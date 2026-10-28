@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Start the WorldBuilder level editor as a desktop app (uses the system's Electron, else a local npm install).
+#
+#   ./worldbuilder-editor                    open the editor
+#   ./worldbuilder-editor <Launcher.exe>     open the editor with that game file
+#   ./worldbuilder-editor --install          add it to the desktop's application menu
+set -euo pipefail
+
+here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+if [ "${1:-}" = "--install" ]; then
+  apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  mkdir -p "$apps"
+  cat >"$apps/worldbuilder-editor.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=WorldBuilder Level Editor
+Comment=Edit missions for LEGO World Builder and World Builder 2
+Exec="$here/worldbuilder-editor" %f
+Terminal=false
+Categories=Game;Development;
+EOF
+  echo "Added to the application menu ($apps/worldbuilder-editor.desktop)."
+  exit 0
+fi
+
+# Prefer a plain "electron", else the newest versioned one (Arch ships electron41, electron43…)
+electron=$(command -v electron 2>/dev/null ||
+  compgen -c electron | grep -E '^electron[0-9]+$' | sort -V | tail -1 || true)
+# …else the copy from 'npm install' in this folder
+[ -z "$electron" ] && [ -x "$here/node_modules/.bin/electron" ] && electron="$here/node_modules/.bin/electron"
+[ -n "$electron" ] && command -v "$electron" >/dev/null ||
+  { echo "Electron isn't installed (run 'npm install' here, or e.g. 'sudo pacman -S electron')." >&2; exit 1; }
+
+export WBE_CWD="$PWD"
+exec "$electron" "$here" "$@"

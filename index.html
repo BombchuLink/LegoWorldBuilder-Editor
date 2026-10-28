@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:">
+<title>WorldBuilder Level Editor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<input id="fileInput" type="file" accept=".exe" hidden>
+<input id="dcrInput" type="file" accept=".dcr" hidden>
+
+<main id="app">
+  <aside id="levels">
+    <div class="paneHead">
+      <div class="panel-title">Levels</div>
+      <button id="btnLevelsPane" class="ghost paneToggle" title="Hide the level list (L)" aria-expanded="true">«</button>
+    </div>
+    <div class="paneStrip">
+      <button id="btnLevelsShow" class="ghost" title="Show the level list (L)"><span>»</span><span class="vert">Levels</span></button>
+      <button id="btnSaveMini" class="ghost" title="Save Launcher.exe… (Ctrl+S)" hidden>⭳</button>
+    </div>
+    <div id="levelList" class="levelList"></div>
+    <div class="paneFoot">
+      <div id="gameLabel" class="muted small"></div>
+      <button id="btnOpen" title="Open Launcher.exe from a World Builder game folder">Open Launcher.exe…</button>
+      <div id="levelTools" class="footButtons" hidden>
+        <button id="btnSave" class="accent" title="Write Launcher.exe with all your changes, or export the .dcr (Ctrl+S)">Save…</button>
+        <button id="btnImport" title="Replace the game in this Launcher.exe with a .dcr movie (written on the next save)">Import .dcr…</button>
+      </div>
+    </div>
+  </aside>
+
+  <section id="stage">
+    <div id="toolbar" hidden>
+      <div class="toolset" id="toolset">
+        <button data-tool="paint" title="Paint terrain or place objects (B). Hold Shift and drag to fill a rectangle. Click an object to select it, drag it to move it, or Alt/Ctrl+click it to replace it with the brush. Shift+click a plan to get a pile of the bricks its model needs.">Brush</button>
+        <button data-tool="fill" title="Flood fill matching terrain (F). Click an object to replace all connected copies of it with the brush.">Fill</button>
+        <button data-tool="erase" title="Remove objects (E)">Erase</button>
+        <button data-tool="pick" title="Pick a tile or object from the map (I)">Eyedropper</button>
+        <button data-tool="select" title="Click a tile to inspect it and edit its object (S). Drag over tiles (Shift+drag to start on an object) to copy them, then click the map to place copies; Esc stops, Ctrl+V picks the copy up again.">Select</button>
+      </div>
+    </div>
+    <div id="canvasWrap">
+      <canvas id="map"></canvas>
+      <div id="welcome">
+        <h1>WorldBuilder Level Editor</h1>
+        <button id="btnOpen2" class="primary big">Open Launcher.exe…</button>
+      </div>
+      <div id="dropHint">Drop Launcher.exe to open it, or a .dcr to import it</div>
+    </div>
+    <footer id="status"><span id="statusText"></span><span id="hoverText" class="muted"></span>
+      <span id="zoomBar" hidden><button id="btnZoomOut" class="ghost" title="Zoom out">−</button><span id="zoomLabel" title="Click for 100%">100%</span><button id="btnZoomIn" class="ghost" title="Zoom in">+</button></span>
+    </footer>
+  </section>
+
+  <aside id="side" hidden>
+    <div class="tabs" id="sideTabs">
+      <button data-tab="palette" class="on">Palette</button>
+      <button data-tab="inspect">Tile</button>
+      <button data-tab="level">Level</button>
+      <button data-tab="text">Text</button>
+      <button data-tab="game">Game</button>
+    </div>
+    <div class="tabBody" id="tab-palette">
+      <div class="paletteGroup">
+        <div class="panel-title">Terrain</div>
+        <div id="palTerrain" class="swatches"></div>
+      </div>
+      <div class="paletteGroup">
+        <div class="panel-title">Objects</div>
+        <div class="seg" id="objCats"></div>
+        <div id="palObjects" class="swatches"></div>
+      </div>
+      <div class="paletteGroup" id="brushOpts"></div>
+    </div>
+    <div class="tabBody" id="tab-inspect" hidden></div>
+    <div class="tabBody" id="tab-level" hidden></div>
+    <div class="tabBody" id="tab-game" hidden></div>
+    <div class="tabBody" id="tab-text" hidden>
+      <p class="muted small">This is the level exactly as the game reads it. Edit it directly and press Apply.</p>
+      <textarea id="levelText" spellcheck="false"></textarea>
+      <div class="row">
+        <button id="btnApplyText" class="primary">Apply</button>
+        <button id="btnExport">Export .txt</button>
+        <button id="btnImport">Import .txt</button>
+        <input id="importInput" type="file" accept=".txt,text/plain" hidden>
+      </div>
+    </div>
+    <div id="problems"></div>
+  </aside>
+  <div id="sideGrip" title="Drag to resize the sidebar (Shift+scroll over it to zoom; double-click resets both)"></div>
+</main>
+
+<dialog id="textsDialog">
+  <form method="dialog" class="dlg">
+    <div class="dlgHead"><b>Game text members</b><button value="close" class="ghost">✕</button></div>
+    <p class="muted small">Other data the game stores as text: mission unlocks (<code>worlds</code>), unit settings (<code>config</code>), descriptions and labels. Changes are saved with the game file.</p>
+    <div class="dlgBody">
+      <select id="textsList" size="18"></select>
+      <textarea id="textsEdit" spellcheck="false"></textarea>
+    </div>
+    <div class="row end"><span id="textsNote" class="muted small"></span><button id="btnTextsApply" class="primary" value="">Apply change</button></div>
+  </form>
+</dialog>
+
+<dialog id="saveDialog">
+  <form method="dialog" class="dlg narrow">
+    <div class="dlgHead"><b>Save</b><button value="close" class="ghost">✕</button></div>
+    <div id="saveBody"></div>
+    <div class="row end"><button value="close">Cancel</button><button id="btnSaveOther" value=""></button><button id="btnDoSave" class="accent" value="">Save</button></div>
+  </form>
+</dialog>
+
+<script src="wbcore.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

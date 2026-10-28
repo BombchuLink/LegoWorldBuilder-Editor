@@ -1,0 +1,4 @@
+node_modules/
+# never commit the games themselves
+*.exe
+*.dcr
