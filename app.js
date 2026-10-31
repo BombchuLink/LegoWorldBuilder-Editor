@@ -1568,7 +1568,7 @@
     box.append(el("div", { class: "field" }, el("label", {}, "Music"),
       el("select", { disabled: !S.levelMusic.length || !S.patchOn.music, onchange: (ev) => { pushUndo(); setLevelMusic(lv, ev.target.value); changed(); } },
         el("option", { value: "" }, "Random (as normal)"),
-        tracks.map((t) => el("option", { value: t, selected: t === current }, "Track " + t.replace(/^music_game_/, "").toUpperCase())),
+        tracks.map((t) => el("option", { value: t, selected: t === current }, trackName(t))),
         current && !tracks.includes(current) ? el("option", { value: current, selected: true }, current) : null)));
     if (!S.levelMusic.length) box.append(el("p", { class: "muted small" }, "This game file can't be set up to choose music per level."));
     else if (!S.patchOn.music) box.append(el("p", { class: "muted small" }, "Turn on \"Music per level\" on the Game tab to choose this level's music."));
@@ -1679,6 +1679,12 @@
     setStatus("Click the map where the camera should start (Esc cancels).");
   }
 
+  // The in-game tracks' names; any other track shows as "Track <letter>"
+  const TRACK_NAMES = {
+    music_game_a: "Blue And Green Makes...", music_game_i: "Joy of Bricks",
+    music_game_6: "Sly Solutions", music_game_8: "Brain Builder",
+  };
+  const trackName = (t) => TRACK_NAMES[t] || "Track " + t.replace(/^music_game_/, "").toUpperCase();
   const MUSIC_LINE = /^music\s*=\s*(.*)$/i;
   function levelMusic(lv) {
     const m = lv.mapExtra.map((l) => MUSIC_LINE.exec(l)).find(Boolean);
