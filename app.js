@@ -122,6 +122,10 @@
     S.levelMusic = await movie.findLevelMusic();
     // reaching a goal saves progress mid-game and freezes it; the fix saves when the mission ends
     S.goalSave = await movie.findGoalSave();
+    // a unit taken apart on a whirlpool after teleporting leaves the pair blocked for good
+    S.whirlpoolFix = await movie.findWhirlpoolFix();
+    // a monster built from a plan comes out selected, so it can be driven like a vehicle
+    S.builtMonsterSelect = await movie.findBuiltMonsterSelect();
     S.unlockAll = await movie.findUnlockAll();
     // goals draw a shadow named after their terrain; deep water has none until the patch adds it
     S.goalShadow = await movie.findGoalShadow();
@@ -1583,7 +1587,15 @@
 
     box.append(el("div", { class: "panel-title" }, "Map size"));
     const fillChar = S.brush.kind === "terrain" ? S.brush.char : "@";
-    const rs = (side, delta) => { pushUndo(); resizeMap(side, delta, fillChar); changed(); fitView(); };
+    // the view stays put: when the top or left edge changes, it shifts so the existing tiles don't move
+    const rs = (side, delta) => {
+      pushUndo();
+      const [dx, dy] = resizeMap(side, delta, fillChar);
+      const [ox, oy] = cellOrigin(dx, dy);
+      S.view.x -= ox * S.view.zoom;
+      S.view.y -= oy * S.view.zoom;
+      changed();
+    };
     // + and − on each edge of a little map; hovering a button lights up the edge it changes
     const edge = (side) => {
       const what = side === "top" || side === "bottom" ? "row" : "column";
@@ -1677,6 +1689,7 @@
     if (track) lv.mapExtra.push("music=" + track);
   }
 
+  /* Returns how far the old cells moved in the grid, [dx, dy] (nonzero only for the top/left edge). */
   function resizeMap(side, delta, fillChar) {
     const lv = lvl();
     const h = lv.grid.length, w = lv.grid[0].length;
@@ -1686,19 +1699,24 @@
         const row = Array.from({ length: w }, blank);
         side === "top" ? lv.grid.unshift(row) : lv.grid.push(row);
         if (side === "top" && lv.center) lv.center[1]++;
+        if (side === "top") return [0, 1];
       } else if (h > 2) {
         side === "top" ? lv.grid.shift() : lv.grid.pop();
         if (side === "top" && lv.center) lv.center[1] = Math.max(0, lv.center[1] - 1);
+        if (side === "top") return [0, -1];
       }
     } else {
       if (delta > 0) {
         for (const r of lv.grid) side === "left" ? r.unshift(blank()) : r.push(blank());
         if (side === "left" && lv.center) lv.center[0]++;
+        if (side === "left") return [1, 0];
       } else if (w > 2) {
         for (const r of lv.grid) side === "left" ? r.shift() : r.pop();
         if (side === "left" && lv.center) lv.center[0] = Math.max(0, lv.center[0] - 1);
+        if (side === "left") return [-1, 0];
       }
     }
+    return [0, 0];
   }
 
   function revertLevel() {
@@ -1859,10 +1877,14 @@
       handlers: () => S.levelMusic, installed: (h) => h.fixed, apply: (h) => S.movie.fixLevelMusic(h), remove: (h) => S.movie.unfixLevelMusic(h) },
     { id: "monsterPlans", label: "Monster plans",
       handlers: () => S.monsterPlans, installed: (h) => h.fixed, apply: (h) => S.movie.fixMonsterPlans(h), remove: (h) => S.movie.unfixMonsterPlans(h) },
+    { id: "builtMonsterSelect", label: "Built monsters can't be controlled", desc: "A monster built from a plan isn't selected when it's done.",
+      handlers: () => S.builtMonsterSelect, installed: (h) => h.fixed, apply: (h) => S.movie.fixBuiltMonsterSelect(h), remove: (h) => S.movie.unfixBuiltMonsterSelect(h) },
     { id: "monsterHealth", label: "Built monsters have inverse health", desc: "Health is 100 minus the energy brick's charge.",
       handlers: () => S.monsterHealth, installed: (h) => h.fixed, apply: (h) => S.movie.fixMonsterHealth(h), remove: (h) => S.movie.unfixMonsterHealth(h) },
     { id: "goalSave", label: "No freeze at goals", desc: "Progress saves when the mission ends instead.",
       handlers: () => S.goalSave, installed: (h) => h.fixed, apply: (h) => S.movie.fixGoalSave(h), remove: (h) => S.movie.unfixGoalSave(h) },
+    { id: "whirlpool", label: "Fix whirlpools stuck after take-apart", desc: "Taking a unit apart on a whirlpool no longer blocks the pair.",
+      handlers: () => S.whirlpoolFix, installed: (h) => h.fixed, apply: (h) => S.movie.fixWhirlpool(h), remove: (h) => S.movie.unfixWhirlpool(h) },
     { id: "unlockAll", label: "Cheat: unlock all levels", off: true,
       handlers: () => S.unlockAll, installed: (h) => h.fixed, apply: (h) => S.movie.fixUnlockAll(h), remove: (h) => S.movie.unfixUnlockAll(h) },
   ];
@@ -1887,7 +1909,9 @@
    * every patch but the cheat) or one saved with them all switched off, so that's told apart by the choices
    * last saved for this game. */
   function initPatches() {
-    const fresh = !PATCHES.some((p) => p.handlers().some(p.installed));
+    // an older version of a patch (h.old) counts as there: it stays on, and saving updates it
+    const present = (p) => p.handlers().some((h) => p.installed(h) || !!h.old);
+    const fresh = !PATCHES.some(present);
     let saved = null;
     try { saved = JSON.parse(prefs.get("patches" + S.game.edition)); } catch (e) { /* none saved */ }
     S.patchOn = {};
@@ -1895,7 +1919,7 @@
       // partly there (a file from before a patch gained its second half): on, and saving completes it.
       // A patch newer than the choices last saved (not in them) starts as it would on a fresh game.
       const known = saved && p.id in saved;
-      const on = fresh ? (known ? saved[p.id] : !p.off) : p.handlers().some(p.installed) || (!known && !p.off);
+      const on = fresh ? (known ? saved[p.id] : !p.off) : present(p) || (!known && !p.off);
       S.patchOn[p.id] = patchAvailable(p) && on;
     }
     S.patchOn.tutorial = null; // null: off once mission 1 is edited (tutorialOff)

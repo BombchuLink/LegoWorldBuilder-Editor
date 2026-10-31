@@ -16,8 +16,10 @@ Saving a .exe applies the following patches to a game. Each one can be switched 
  - Objects that can exist in deep water can be placed in deep water, including goals
  - Each level can chose which music track plays (instead of random)
  - Plans for monsters (except the boulder)
+ - Built monsters can't be controlled (they're no longer selected when they finish building)
  - Built monsters have inverse health compared to the energy brick used
  - On saving World 1 map 1, the Tutorial map is moved to map 999
+ - Taking a unit apart on a whirlpool after teleporting no longer leaves that whirlpool pair unusable
  - Reaching a goal or bonus goal no longer freezes the game: progress is saved when the mission ends (End/Restart) instead
  - Cheat (off unless you tick it): every mission and world is unlocked from the start
 

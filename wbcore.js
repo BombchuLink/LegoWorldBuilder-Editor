@@ -1176,6 +1176,113 @@
     handler.fixed = false;
   };
 
+  /* A whirlpool remembers the unit going through it (pOccupant, on both ends of the pair) and
+   * MoveObject won't let any other unit onto it while that's set:
+   *   wpuser = ttile.whirlpool.getUser()
+   *   if not voidp(wpuser) and wpuser <> ftile.occupant then return [0, ttile]
+   * It's only cleared by leaveWhirlpool when the unit drives off. A unit taken apart after
+   * teleporting is still sitting on the far whirlpool, so that one stays taken for good, and the
+   * pair is dead. The fix puts this at the top of the whirlpool's stepFrame:
+   *   if not voidp(pOccupant) then
+   *     if not voidp(pWhirlpoolPartner) then
+   *       if me.getProp(#pTile, #occupant) <> pOccupant then
+   *         if pWhirlpoolPartner.getProp(#pTile, #occupant) <> pOccupant then pOccupant = void
+   * (a unit really using the pair always stands on one of its two tiles).
+   * Returns [{...handler, at, template, fixed}]. */
+  function whirlpoolCode(names) {
+    const n = nameRef(names), k = (x) => { const [hi, lo] = n(x); return (hi << 8) | lo; };
+    const OCC = ["getprop", k("pOccupant")], PARTNER = ["getprop", k("pWhirlpoolPartner")];
+    const tileOccupant = [["pushsymb", k("pTile")], ["pushsymb", k("occupant")], ["pusharglist", 3], ["objcall", k("getProp")]];
+    return lingo([
+      OCC, ["pusharglist", 1], ["extcall", k("voidp")], ["not"], ["jmpifz", "end"],
+      PARTNER, ["pusharglist", 1], ["extcall", k("voidp")], ["not"], ["jmpifz", "end"],
+      ["getparam", 0], ...tileOccupant, OCC, ["nteq"], ["jmpifz", "end"],
+      PARTNER, ...tileOccupant, OCC, ["nteq"], ["jmpifz", "end"],
+      ["pusharglist", 0], ["extcall", k("void")], ["setprop", k("pOccupant")],
+      { label: "end" },
+    ]);
+  }
+
+  Movie.prototype.findWhirlpoolFix = async function () {
+    const all = [], scripts = new Set();
+    for await (const h of this.handlers()) { all.push(h); if (h.name === "enterWhirlpool") scripts.add(h.id); }
+    const found = [];
+    for (const h of all) {
+      if (h.name !== "stepFrame" || !scripts.has(h.id)) continue;
+      let template;
+      try { template = whirlpoolCode(h.names); } catch { continue; }
+      const fixed = h.code.length >= template.length && template.every((b, i) => h.code[i] === b);
+      found.push({ ...h, at: 0, template, fixed });
+    }
+    return found.length === 1 ? found : [];
+  };
+
+  Movie.prototype.fixWhirlpool = async function (handler) {
+    if (handler.fixed) return;
+    const code = insertCode(handler.code, handler.at, handler.template);
+    await this.replaceHandlerCode(handler.id, handler.rec, code);
+    handler.code = code;
+    handler.fixed = true;
+  };
+
+  Movie.prototype.unfixWhirlpool = async function (handler) {
+    if (!handler.fixed) return;
+    const code = cutCode(handler.code, handler.at, handler.at + handler.template.length);
+    await this.replaceHandlerCode(handler.id, handler.rec, code);
+    handler.code = code;
+    handler.fixed = false;
+  };
+
+  /* Monsters can't be controlled: map_display.forwardClick only passes a click on to a tile's
+   * occupant when its occupant_type isn't #monster. But when something's been built, the build
+   * cloud's prepareFrame selects it once the cloud clears, straight past that check:
+   *   if not pObject.pDead then pObject.click(#mouseDown, #dontplaysound)
+   * so a monster built from a plan came out selected, with its menu, and could be driven around.
+   * The fix makes that
+   *   if not pObject.pDead and not pObject.monsterP() then ...
+   * (every object has monsterP; monster.generic's says yes). Returns [{...handler, at, template, fixed}]. */
+  function builtSelectTest(names) {
+    const n = nameRef(names), k = (x) => { const [hi, lo] = n(x); return (hi << 8) | lo; };
+    return lingo([["getprop", k("pObject")], ["pusharglist", 1], ["objcall", k("monsterP")], ["not"], ["and"]]);
+  }
+
+  Movie.prototype.findBuiltMonsterSelect = async function () {
+    const found = [];
+    for await (const h of this.handlers()) {
+      if (h.name !== "prepareFrame") continue;
+      const pObject = h.names.indexOf("pObject"), pDead = h.names.indexOf("pDead"), click = h.names.indexOf("click");
+      if (pObject < 0 || pDead < 0 || click < 0 || h.names.indexOf("monsterP") < 0) continue;
+      const ins = decode(h.code);
+      // getprop pObject, getobjprop pDead, not, [the fix], jmpifz, getprop pObject, ..., objcall click
+      const k = ins.findIndex((i, j) => i.op === 0x4a && i.arg === pObject && ins[j + 1] && ins[j + 1].op === 0x61 &&
+        ins[j + 1].arg === pDead && ins[j + 2] && ins[j + 2].op === 0x14);
+      if (k < 0) continue;
+      const at = ins[k + 2].p + 1, template = builtSelectTest(h.names);
+      const fixed = h.code.length >= at + template.length && template.every((b, i) => h.code[at + i] === b);
+      const jz = ins.find((i) => i.p === (fixed ? at + template.length : at));
+      const call = ins.find((i) => jz && i.p > jz.p && i.op === 0x67 && i.arg === click);
+      if (!jz || jz.op !== OP.jmpifz || !call || call.p > jz.p + jz.arg) continue;
+      found.push({ ...h, at, template, fixed });
+    }
+    return found.length === 1 ? found : [];
+  };
+
+  Movie.prototype.fixBuiltMonsterSelect = async function (handler) {
+    if (handler.fixed) return;
+    const code = insertCode(handler.code, handler.at, handler.template);
+    await this.replaceHandlerCode(handler.id, handler.rec, code);
+    handler.code = code;
+    handler.fixed = true;
+  };
+
+  Movie.prototype.unfixBuiltMonsterSelect = async function (handler) {
+    if (!handler.fixed) return;
+    const code = cutCode(handler.code, handler.at, handler.at + handler.template.length);
+    await this.replaceHandlerCode(handler.id, handler.rec, code);
+    handler.code = code;
+    handler.fixed = false;
+  };
+
   /* Cheat: every mission and world is open. A mission's state is <0 locked, 0 open, >=1 done:
    *   readWorlds   starts every mission at -1 ([#opens: ..., #state: -1])
    *   setState     then puts back the saved progress from the Prefs file
@@ -1600,8 +1707,11 @@
   /* A built monster's health is the inverse of the energy brick it was built with. Units' health is
    * their energy (pInfo.energy: one 0-100 charge per energy brick in the recipe). A monster placed by
    * the level has none yet and gets full bricks; a built one gets the charges of the bricks used
-   * (map_display.createObject's #energy). monster.generic's init, after it sets the speed, gets:
-   *   if ilk(me.pInfo[#energy]) = #list then
+   * (map_display.createObject's #energy). readmap calls init twice on a level's [mapitems] units,
+   * and by the second call a placed monster has its full bricks, so the inverting only happens on a
+   * monster's first init (pWandering is set at the end of init and never cleared).
+   * monster.generic's init, after it sets the speed, gets:
+   *   if voidp(pWandering) and ilk(me.pInfo[#energy]) = #list then
    *     speedScale = 1   -- init's only local, done with by then
    *     repeat while speedScale <= count(me.pInfo[#energy])
    *       me.pInfo[#energy][speedScale] = max(1, 100 - me.pInfo[#energy][speedScale])
@@ -1610,13 +1720,13 @@
    *   end if
    * so a nearly empty brick makes a healthy monster and a full one a nearly dead one (at least 1:
    * at 0 the game treats it as dead, standing still until something hits it). */
-  const HEALTH_NAMES = ["pInfo", "energy", "count", "getAt", "setAt", "ilk", "list", "max"];
+  const HEALTH_NAMES = ["pInfo", "energy", "count", "getAt", "setAt", "ilk", "list", "max", "voidp", "pWandering"];
 
   // Bytecode from [op, arg] / {label} / [jump op, label] items; arguments take 1 or 2 bytes as needed
   function lingo(items) {
-    const BASE = { eq: 0x0f, lteq: 0x0d, sub: 0x06, add: 0x05, pushint8: 0x41, pusharglistnoret: 0x42, pusharglist: 0x43,
-      pushsymb: 0x45, getparam: 0x4b, getlocal: 0x4c, setlocal: 0x52, jmpifz: 0x55, endrepeat: 0x54, extcall: 0x57,
-      getobjprop: 0x61, objcall: 0x67 };
+    const BASE = { eq: 0x0f, nteq: 0x0e, and: 0x12, lteq: 0x0d, sub: 0x06, add: 0x05, not: 0x14, pushint8: 0x41, pusharglistnoret: 0x42,
+      pusharglist: 0x43, pushsymb: 0x45, getprop: 0x4a, getparam: 0x4b, getlocal: 0x4c, setprop: 0x50, setlocal: 0x52,
+      jmpifz: 0x55, endrepeat: 0x54, extcall: 0x57, getobjprop: 0x61, objcall: 0x67 };
     const JUMPS = new Set(["jmpifz", "endrepeat"]);
     const size = (it) => (it.label ? 0 : it.length === 1 ? 1 : JUMPS.has(it[0]) || it[1] > 0xff ? 3 : 2);
     const labels = {};
@@ -1634,10 +1744,14 @@
     return new Uint8Array(out);
   }
 
-  function healthCode(names, local) {
+  /* firstOnly false gives the patch's first version (which also inverted a placed monster's full
+   * bricks on its second init), so a game that has it can be found and upgraded. */
+  function healthCode(names, local, firstOnly = true) {
     const n = (x) => names.indexOf(x);
     const E = [["getparam", 0], ["getobjprop", n("pInfo")], ["pushsymb", n("energy")], ["pusharglist", 2], ["objcall", n("getAt")]];
+    const first = firstOnly ? [["getprop", n("pWandering")], ["pusharglist", 1], ["extcall", n("voidp")], ["jmpifz", "end"]] : [];
     return lingo([
+      ...first,
       ...E, ["pusharglist", 1], ["extcall", n("ilk")], ["pushsymb", n("list")], ["eq"], ["jmpifz", "end"],
       ["pushint8", 1], ["setlocal", local],
       { label: "loop" },
@@ -1660,6 +1774,7 @@
 
   Movie.prototype.fixMonsterHealth = async function (handler) {
     if (handler.fixed) return;
+    if (handler.old) await this.unfixMonsterHealth(handler);
     const code = insertCode(handler.code, handler.at, handler.template);
     await this.replaceHandlerCode(handler.id, handler.rec, code);
     handler.code = code;
@@ -1667,11 +1782,13 @@
   };
 
   Movie.prototype.unfixMonsterHealth = async function (handler) {
-    if (!handler.fixed) return;
-    const code = cutCode(handler.code, handler.at, handler.at + handler.template.length);
+    const t = handler.fixed ? handler.template : handler.old;
+    if (!t) return;
+    const code = cutCode(handler.code, handler.at, handler.at + t.length);
     await this.replaceHandlerCode(handler.id, handler.rec, code);
     handler.code = code;
     handler.fixed = false;
+    handler.old = null;
   };
 
   /* monster.generic's init (the script with "wander"), where its speed is set: {id, rec, code, at,
@@ -1688,9 +1805,11 @@
       const set = ins.findIndex((i) => i.op === 0x62); // setobjprop
       if (ins[0].op !== OP.pushint8 || ins[0].arg !== 80 || first < 0 || set < 0) continue;
       const at = ins[set].p + ins[set].len;
-      const template = healthCode(h.names, ins[first].arg);
-      const fixed = h.code.length >= at + template.length && template.every((b, i) => h.code[at + i] === b);
-      return { ...h, at, template, fixed, monsterHealth: true };
+      const template = healthCode(h.names, ins[first].arg), oldTemplate = healthCode(h.names, ins[first].arg, false);
+      const has = (t) => h.code.length >= at + t.length && t.every((b, i) => h.code[at + i] === b);
+      const fixed = has(template);
+      // an older version of the patch counts as not installed; fixing swaps it for this one
+      return { ...h, at, template, fixed, old: !fixed && has(oldTemplate) ? oldTemplate : null, monsterHealth: true };
     }
     return null;
   };
