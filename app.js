@@ -123,7 +123,25 @@
     // reaching a goal saves progress mid-game and freezes it; the fix saves when the mission ends
     S.goalSave = await movie.findGoalSave();
     S.unlockAll = await movie.findUnlockAll();
+    // goals draw a shadow named after their terrain; deep water has none until the patch adds it
+    S.goalShadow = await movie.findGoalShadow();
+    S.goalShadowsBase = new Set(game.goalShadows);
+    // monsters get plans once the game has their plans-bar icons; the editor shows them from the start
+    S.monsterPlans = await movie.findMonsterPlans();
+    S.monsterHealth = await movie.findMonsterHealth();
+    S.planIconsBase = new Set(game.planIcons);
+    S.monsterPlanIcons = new Map();
+    for (const h of S.monsterPlans) for (const t of h.targets) {
+      S.monsterPlanIcons.set(t.member, t.name);
+      if (!movie.byName.has(t.member)) {
+        const p = createImageBitmap(new ImageData(new Uint8ClampedArray(t.icon.rgba), t.icon.w, t.icon.h))
+          .then((img) => ({ img, w: t.icon.w, h: t.icon.h, regX: t.icon.regX, regY: t.icon.regY }));
+        S.sprites.set(t.member, p);
+        p.then((r) => S.sprites.set(t.member, r));
+      }
+    }
     initPatches();
+    syncGoalShadows();
     $("#gameLabel").textContent = `World Builder${game.edition === 2 ? " 2" : ""} · ${file.name} · ${game.levels.length} levels`;
     $("#welcome").hidden = true;
     $("#toolbar").hidden = false;
@@ -224,7 +242,13 @@
 
   function planSpriteName(name) {
     const n = name === "repairbot" ? "repairBot" : name;
-    return [`vehicle.${n}.plan`, `building.${n}.plan`, `monster.${n}.plan`].find(hasSprite) || null;
+    // a monster's icon counts while the Monster plans patch is ticked (it's added to the game on save)
+    const icon = (s) => (S.monsterPlanIcons && S.monsterPlanIcons.has(s) ? S.patchOn && S.patchOn.monsterPlans : hasSprite(s));
+    return [`vehicle.${n}.plan`, `building.${n}.plan`, `monster.${n}.plan`].find(icon) || null;
+  }
+  // Models a plan can be for: vehicles, buildings and (with their icons) monsters, never the boulder
+  function planModels() {
+    return [...placeable("vehicle"), ...placeable("building"), ...placeable("monster").filter((n) => n !== "boulder")].filter(planSpriteName);
   }
 
   function pileSpriteName(res, amount) {
@@ -241,7 +265,7 @@
     return "vehicle";
   }
   function displayName(name) {
-    for (const cls of ["vehicle", "building"]) {
+    for (const cls of ["vehicle", "building", "monster"]) {
       const c = S.game.config[cls] && S.game.config[cls][name];
       if (c && c.name) return c.name;
     }
@@ -1316,8 +1340,9 @@
     } else if (cat === "monster") {
       for (const n of placeable("monster")) if (n !== "boulder") addUnit("monster", n);
     } else if (cat === "plan") {
-      for (const cls of ["vehicle", "building"]) for (const n of placeable(cls)) {
-        if (!planSpriteName(n)) continue;
+      if (S.monsterPlans.length && !S.patchOn.monsterPlans)
+        box.append(el("p", { class: "muted small", style: "grid-column: 1 / -1; margin: 0 0 4px" }, "Plans for monsters: switch on the Monster plans patch on the Game tab."));
+      for (const n of planModels()) {
         const recipe = recipeOf(n);
         add({ type: "plan", name: n }, planSpriteName(n), displayName(n), recipe ? recipeText(recipe) : displayName(n));
       }
@@ -1332,7 +1357,7 @@
   }
 
   function recipeOf(name) {
-    for (const cls of ["vehicle", "building"]) {
+    for (const cls of ["vehicle", "building", "monster"]) {
       const c = S.game.config[cls] && S.game.config[cls][name];
       if (c && c.recipe) return c.recipe;
     }
@@ -1493,7 +1518,7 @@
           [...new Set([...placeable(cls), parts[2]])].map((n) => el("option", { value: n, selected: n === parts[2] }, displayName(n))))));
       card.append(el("div", { class: "meta" }, unitTooltip(cls, parts[2]).split("\n").slice(1).join(" · ")));
     } else if (base === "plan") {
-      const all = [...placeable("vehicle"), ...placeable("building")].filter(planSpriteName);
+      const all = [...new Set([...planModels(), parts[1]])];
       card.append(el("div", { class: "field" }, el("label", {}, "Model"),
         el("select", { onchange: (e) => set([parts[0], e.target.value, parts[2]]) }, all.map((n) => el("option", { value: n, selected: n === parts[1] }, displayName(n))))));
       card.append(el("div", { class: "field" }, el("label", {}, "Uses"),
@@ -1573,10 +1598,10 @@
     box.append(el("p", { class: "muted small" }, `New rows and columns are filled with the selected terrain brush (or holes).`));
 
     box.append(el("div", { class: "panel-title" }, "Starting plans (inventory)"));
-    const all = [...placeable("vehicle"), ...placeable("building")].filter(planSpriteName);
+    const all = planModels();
     lv.inventory.forEach((inv, i) => {
       box.append(el("div", { class: "inv" },
-        el("select", { onchange: (ev) => { pushUndo(); inv.name = ev.target.value; changed(); } }, all.map((n) => el("option", { value: n, selected: n === inv.name }, displayName(n)))),
+        el("select", { onchange: (ev) => { pushUndo(); inv.name = ev.target.value; changed(); } }, [...new Set([...all, inv.name])].map((n) => el("option", { value: n, selected: n === inv.name }, displayName(n)))),
         el("input", { type: "number", min: 1, max: 99, value: inv.count, onchange: (ev) => { pushUndo(); inv.count = Math.max(1, +ev.target.value || 1); changed(); } }),
         el("button", { title: "Remove", onclick: () => { pushUndo(); lv.inventory.splice(i, 1); changed(); } }, "×")));
     });
@@ -1818,22 +1843,40 @@
   /* Changes the editor can make to the game's own code. Each can be switched on or off on the Game
    * tab; saving adds or takes out each one to match (taking one out restores the original code). */
   const PATCHES = [
-    { id: "keys", label: "WASD and Q keys", desc: "W A S D scroll the map instead of the arrow keys, and Q takes apart the selected model like its Take Apart button.",
+    { id: "keys", label: "WASD to scroll, Q to take apart",
       handlers: () => S.keyHandlers, installed: (h) => h.wasd, apply: (h) => S.movie.setWasdControls(h), remove: (h) => S.movie.unsetWasdControls(h) },
-    { id: "menu", label: "Esc opens the menu", desc: "Esc opens the in-game menu during a mission (music, sound, end, restart, continue) and closes it again.",
+    { id: "menu", label: "Esc opens the menu",
       handlers: () => S.keyHandlers, installed: (h) => h.menu, apply: (h) => S.movie.setMenuKey(h), remove: (h) => S.movie.unsetMenuKey(h) },
-    { id: "swoop", label: "Plan pickup fix", desc: "Picking up two copies of the same plan in quick succession no longer leaves the plan's icon stuck over the map.",
+    { id: "swoop", label: "Fix plan icon getting stuck on pickup",
       handlers: () => S.planSwoops, installed: (h) => h.fixed, apply: (h) => S.movie.fixPlanSwoop(h), remove: (h) => S.movie.unfixPlanSwoop(h) },
-    { id: "deep", label: "Units and plans on deep water", desc: "Levels can start swimmers and plans on deep water. Without it the game puts them on plain water.",
-      handlers: () => S.deepWater, installed: (h) => h.fixed, apply: (h) => S.movie.fixDeepWater(h), remove: (h) => S.movie.unfixDeepWater(h) },
-    { id: "music", label: "Music per level", desc: "A level can choose its music (Level tab). Without it every mission plays a random track.",
+    // two changes in one: the level loader reads a deep-water terrain for units and plans, and the
+    // game gets a goal shadow for deep water (goals draw one named after their terrain)
+    { id: "deep", label: "Objects on deep water",
+      handlers: () => [...S.deepWater, ...S.goalShadow], installed: (h) => h.fixed,
+      apply: (h) => (h.goalShadow ? S.movie.fixGoalShadow(h) : S.movie.fixDeepWater(h)),
+      remove: (h) => (h.goalShadow ? S.movie.unfixGoalShadow(h) : S.movie.unfixDeepWater(h)) },
+    { id: "music", label: "Music per level",
       handlers: () => S.levelMusic, installed: (h) => h.fixed, apply: (h) => S.movie.fixLevelMusic(h), remove: (h) => S.movie.unfixLevelMusic(h) },
-    { id: "goalSave", label: "No freeze at goals", desc: "Reaching a goal or bonus goal no longer freezes the game while progress is saved; it's saved when the mission ends (End or Restart) instead. Closing the window mid-mission loses that mission's result.",
+    { id: "monsterPlans", label: "Monster plans",
+      handlers: () => S.monsterPlans, installed: (h) => h.fixed, apply: (h) => S.movie.fixMonsterPlans(h), remove: (h) => S.movie.unfixMonsterPlans(h) },
+    { id: "monsterHealth", label: "Built monsters have inverse health", desc: "Health is 100 minus the energy brick's charge.",
+      handlers: () => S.monsterHealth, installed: (h) => h.fixed, apply: (h) => S.movie.fixMonsterHealth(h), remove: (h) => S.movie.unfixMonsterHealth(h) },
+    { id: "goalSave", label: "No freeze at goals", desc: "Progress saves when the mission ends instead.",
       handlers: () => S.goalSave, installed: (h) => h.fixed, apply: (h) => S.movie.fixGoalSave(h), remove: (h) => S.movie.unfixGoalSave(h) },
     { id: "unlockAll", label: "Cheat: unlock all levels", off: true,
-      desc: "Every mission and world is open from the start. Missions it opens are saved as open in the game's progress, so they stay open if you switch it off again.",
       handlers: () => S.unlockAll, installed: (h) => h.fixed, apply: (h) => S.movie.fixUnlockAll(h), remove: (h) => S.movie.unfixUnlockAll(h) },
   ];
+  // level checks see the deep-water goal shadow as there when the patch is ticked (it's added on save)
+  function syncGoalShadows() {
+    S.game.planIcons = new Set(S.planIconsBase);
+    for (const h of S.monsterPlans) for (const t of h.targets) {
+      if (S.patchOn.monsterPlans) S.game.planIcons.add(t.name);
+      else S.game.planIcons.delete(t.name);
+    }
+    S.game.goalShadows = new Set(S.goalShadowsBase);
+    if (S.patchOn.deep && S.goalShadow.length) S.game.goalShadows.add("water_undiggable");
+    else if (S.goalShadow.length) S.game.goalShadows.delete("water_undiggable");
+  }
   const TUTORIAL_LABEL = "Mission 1 without the tutorial";
   const patchAvailable = (p) => p.handlers().length > 0;
   const patchInstalled = (p) => patchAvailable(p) && p.handlers().every(p.installed);
@@ -1849,7 +1892,10 @@
     try { saved = JSON.parse(prefs.get("patches" + S.game.edition)); } catch (e) { /* none saved */ }
     S.patchOn = {};
     for (const p of PATCHES) {
-      const on = fresh ? (saved && p.id in saved ? saved[p.id] : !p.off) : patchInstalled(p);
+      // partly there (a file from before a patch gained its second half): on, and saving completes it.
+      // A patch newer than the choices last saved (not in them) starts as it would on a fresh game.
+      const known = saved && p.id in saved;
+      const on = fresh ? (known ? saved[p.id] : !p.off) : p.handlers().some(p.installed) || (!known && !p.off);
       S.patchOn[p.id] = patchAvailable(p) && on;
     }
     S.patchOn.tutorial = null; // null: off once mission 1 is edited (tutorialOff)
@@ -1861,17 +1907,19 @@
       el("p", { class: "muted small" }, "Changes to the game itself, made when you save. Unticking one takes it back out of the game."));
     const row = (label, desc, checked, disabled, onchange) => el("div", { class: "card" },
       el("label", { class: "check", style: "color:var(--text)" }, el("input", { type: "checkbox", checked, disabled, onchange }), " ", el("b", {}, label)),
-      el("div", { class: "meta" }, desc));
+      desc ? el("div", { class: "meta" }, desc) : null);
     for (const p of PATCHES) {
       const ok = patchAvailable(p);
       box.append(row(p.label, ok ? p.desc : "This game file doesn't have the code this changes.", S.patchOn[p.id], !ok, (ev) => {
         S.patchOn[p.id] = ev.target.checked;
+        syncGoalShadows();
+        if (p.id === "monsterPlans") buildObjectCats();
         refreshPanels();
       }));
     }
     if (S.tutorialHook) {
       box.append(row(TUTORIAL_LABEL,
-        "World 1 mission 1 plays as a normal level instead of starting the tutorial (the world map's Tutorial button still works). Switched on by itself when you edit mission 1, unless you set it here.",
+        "Turns on by itself when you edit mission 1.",
         tutorialOff(), false, (ev) => { S.patchOn.tutorial = ev.target.checked; refreshPanels(); }));
     }
   }

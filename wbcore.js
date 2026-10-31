@@ -1253,6 +1253,482 @@
     handler.fixed = false;
   };
 
+  // ---------------------------------------------------------------- deep-water goal shadow
+
+  /* A goal (or bonus goal) draws its shadow from the member "goal.shadow." & <its tile's terrain>.
+   * The games only ship shadows for some terrains (normal and water; WB2 also goalterrain), so a goal
+   * on deep water ("goal,freighter,water_undiggable") stops with a script error. The fix adds a
+   * "goal.shadow.water_undiggable" member: the water shadow, darkened to stand out on deep water. */
+  const DEEP_SHADOW = "goal.shadow.water_undiggable", WATER_SHADOW = "goal.shadow.water";
+  // Scales the water shadow's colours (fill 0,204,204, rim 0,204,255) to 0,102,112 and 0,102,140: clearly
+  // darker than the deep-water tile (14,153,184), as the water shadow is darker than plain water.
+  const DEEP_TINT = [0.5, 0.5, 0.55];
+
+  // PackBits, one row at a time (runs never cross a row, which every decoder accepts)
+  function packbitsEncode(d, pitch) {
+    const out = [];
+    for (let r = 0; r < d.length; r += pitch) {
+      const row = d.subarray(r, Math.min(r + pitch, d.length));
+      let i = 0;
+      while (i < row.length) {
+        let run = 1;
+        while (i + run < row.length && run < 128 && row[i + run] === row[i]) run++;
+        if (run >= 2) { out.push(257 - run, row[i]); i += run; continue; }
+        let n = 1;
+        while (i + n < row.length && n < 128 && !(i + n + 1 < row.length && row[i + n] === row[i + n + 1])) n++;
+        out.push(n - 1, ...row.subarray(i, i + n));
+        i += n;
+      }
+    }
+    return new Uint8Array(out);
+  }
+
+  // A CASt record with its name (info item 1) replaced
+  function castWithName(d, name) {
+    const infoLen = be32(d, 4), specLen = be32(d, 8);
+    const info = d.subarray(12, 12 + infoLen), spec = d.subarray(12 + infoLen, 12 + infoLen + specLen);
+    const dataOff = be32(info, 0), n = be16(info, dataOff);
+    const offs = [];
+    for (let i = 0; i <= n; i++) offs.push(be32(info, dataOff + 2 + 4 * i));
+    const base = dataOff + 2 + 4 * (n + 1);
+    const items = [];
+    for (let i = 0; i < n; i++) items.push(info.subarray(base + offs[i], base + offs[i + 1]));
+    items[1] = new Uint8Array([name.length, ...fromLatin1(name)]);
+    const body = items.reduce((s, x) => s + x.length, 0);
+    const ni = new Uint8Array(base + body);
+    const dv = new DataView(ni.buffer);
+    ni.set(info.subarray(0, dataOff + 2));
+    let o = 0;
+    items.forEach((x, i) => { dv.setUint32(dataOff + 2 + 4 * i, o); ni.set(x, base + o); o += x.length; });
+    dv.setUint32(dataOff + 2 + 4 * n, o);
+    const out = new Uint8Array(12 + ni.length + spec.length);
+    out.set(d.subarray(0, 12));
+    new DataView(out.buffer).setUint32(4, ni.length);
+    out.set(ni, 12);
+    out.set(spec, 12 + ni.length);
+    return out;
+  }
+
+  // KEY* rows: {child resource id, parent id, tag}
+  Movie.prototype._editKeys = async function (fn) {
+    const id = this.entries.find((e) => e.tag === "KEY*").id;
+    const key = await this.data(id);
+    const kv = new DataView(key.buffer, key.byteOffset, key.byteLength);
+    const rows = [];
+    for (let i = 0; i < kv.getUint32(8, true); i++) {
+      const o = 12 + 12 * i;
+      rows.push({ sid: kv.getUint32(o, true), parent: kv.getUint32(o + 4, true), raw: key.slice(o + 8, o + 12) });
+    }
+    // the player looks rows up by parent (binary search), so they stay sorted by it; the sort is
+    // stable, so rows already in order keep their places
+    const keep = fn(rows).map((r, i) => ({ r, i })).sort((a, b) => a.r.parent - b.r.parent || a.i - b.i).map((x) => x.r);
+    const max = Math.max(kv.getUint32(4, true), keep.length);
+    // the unused rows past the end hold a filler row; keep them, and refill rows that get freed
+    const out = new Uint8Array(Math.max(key.length, 12 + 12 * max));
+    out.set(key);
+    const ov = new DataView(out.buffer);
+    ov.setUint32(4, max, true);
+    ov.setUint32(8, keep.length, true);
+    const fill = key.length >= 24 + 12 * rows.length ? key.slice(12 + 12 * rows.length, 24 + 12 * rows.length) : new Uint8Array(12);
+    for (let i = keep.length; i < rows.length; i++) out.set(fill, 12 + 12 * i);
+    keep.forEach((r, i) => {
+      ov.setUint32(12 + 12 * i, r.sid, true);
+      ov.setUint32(16 + 12 * i, r.parent, true);
+      out.set(r.raw || fromLatin1(r.tag.split("").reverse().join("")), 20 + 12 * i);
+    });
+    this.setData(id, out);
+  };
+
+  // KEY* rows, read only
+  Movie.prototype._readKeys = async function (fn) {
+    const key = await this.data(this.entries.find((e) => e.tag === "KEY*").id);
+    const kv = new DataView(key.buffer, key.byteOffset, key.byteLength);
+    const rows = [];
+    for (let i = 0; i < kv.getUint32(8, true); i++) rows.push({ sid: kv.getUint32(12 + 12 * i, true), parent: kv.getUint32(16 + 12 * i, true) });
+    return fn(rows);
+  };
+
+  // Which CAS* resource (cast library) holds a member, and at which slot
+  Movie.prototype._castSlot = async function (memberId) {
+    for (const e of this.entries) {
+      if (e.tag !== "CAS*") continue;
+      const d = await this.data(e.id);
+      for (let i = 0; i + 4 <= d.length; i += 4) if (be32(d, i) === memberId) return { cas: e.id, at: i };
+    }
+    return null;
+  };
+
+  Movie.prototype._reindexMembers = async function () {
+    this.cache.clear();
+    await this._index();
+  };
+
+  /* Is member `name` there as this version adds it: bitmap data `want`, resource ids within the
+   * movie's limit and KEY* in order? Older versions of the editor's additions fail this, so their
+   * patches count as not installed and saving puts them back right. */
+  Movie.prototype._memberIsCurrent = async function (name, want) {
+    const m = this.byName.get(name);
+    if (!m || !(await this._memberHasBitmap(name, want))) return false;
+    const ids = [m.id, ...Object.values(this.children.get(m.id) || {})];
+    let keysSorted = true;
+    await this._readKeys((rows) => { for (let i = 1; i < rows.length; i++) if (rows[i].parent < rows[i - 1].parent) keysSorted = false; });
+    return keysSorted && ids.every((id) => id <= this.abmpUnk2);
+  };
+
+  Movie.prototype._memberHasBitmap = async function (name, want) {
+    const m = this.byName.get(name);
+    const bitd = m ? this.child(m.id, "BITD") : null;
+    const have = bitd != null ? await this.data(bitd) : null;
+    return !!have && have.length === want.length && have.every((b, i) => b === want[i]);
+  };
+
+  /* Resource ids for new resources. The ABMP header's second number is the movie's highest
+   * resource id, and the player only knows resources up to it, so new ones take unused ids below it
+   * (gaps left by resources that were deleted or that Afterburner dropped, which KEY* may still name). */
+  Movie.prototype._freeIds = async function (n) {
+    const taken = new Set(this.entries.map((e) => e.id));
+    await this._readKeys((rows) => { for (const r of rows) { taken.add(r.sid); taken.add(r.parent); } });
+    for (const lib of this.castLibs) for (const id of lib) taken.add(id);
+    for (const e of this.entries) {
+      if (e.tag !== "Lctx") continue;
+      const d = await this.data(e.id);
+      const count = be32(d, 8), off = be16(d, 16);
+      for (let i = 0; i < count; i++) taken.add(be32(d, off + 12 * i + 4));
+    }
+    const out = [];
+    for (let id = this.abmpUnk2; id > 1024 && out.length < n; id--) if (!taken.has(id)) out.push(id);
+    if (out.length < n) throw new Error("No free resource ids left in this movie");
+    return out;
+  };
+
+  /* Add a bitmap member (its CASt record and BITD data) in a free slot of the cast library that
+   * holds member `near`. */
+  Movie.prototype._addMember = async function (cast, bitd, near) {
+    const slot = await this._castSlot(near);
+    const lib = await this.data(slot.cas);
+    let at = -1;
+    for (let i = 0; i + 4 <= lib.length; i += 4) if (be32(lib, i) === 0) { at = i; break; }
+    if (at < 0) throw new Error("The cast has no free member slot");
+    const [castId, bitdId] = await this._freeIds(2);
+
+    // the member record loads with the movie (like every other CASt); its bitmap streams in later
+    const ce = { id: castId, off: -1, csize: cast.length, usize: cast.length, ctype: 0, tag: "CASt", ilsData: cast };
+    const be = { id: bitdId, off: Number.MAX_SAFE_INTEGER, csize: bitd.length, usize: bitd.length, ctype: 0, tag: "BITD" };
+    this.entries.push(ce, be);
+    this.ilsOrder.push(castId);
+    this.setData(castId, cast);
+    this.setData(bitdId, bitd);
+    this.byId.set(castId, ce);
+    this.byId.set(bitdId, be);
+
+    const newLib = lib.slice();
+    new DataView(newLib.buffer).setUint32(at, castId);
+    this.setData(slot.cas, newLib);
+    await this._editKeys((rows) => [...rows, { sid: bitdId, parent: castId, tag: "BITD" }]);
+    await this._reindexMembers();
+  };
+
+  // Take a member (and its BITD, Thum...) back out of the movie
+  Movie.prototype._removeMember = async function (name) {
+    const m = this.byName.get(name);
+    if (!m) return;
+    const gone = new Set([m.id]);
+    const kids = this.children.get(m.id) || {};
+    for (const t of Object.keys(kids)) gone.add(kids[t]);
+    const slot = await this._castSlot(m.id);
+    if (slot) {
+      const lib = (await this.data(slot.cas)).slice();
+      new DataView(lib.buffer).setUint32(slot.at, 0);
+      this.setData(slot.cas, lib);
+    }
+    await this._editKeys((rows) => rows.filter((r) => !gone.has(r.sid) && !gone.has(r.parent)));
+    this.entries = this.entries.filter((e) => !gone.has(e.id));
+    this.ilsOrder = this.ilsOrder.filter((id) => !gone.has(id));
+    for (const id of gone) { this.byId.delete(id); this.modified.delete(id); }
+    await this._reindexMembers();
+  };
+
+  /* [{fixed, goalShadow}] when the game has a water goal shadow to build the deep-water one from.
+   * Part of the editor's "Deep water" patch, together with findDeepWater's readmap fix. */
+  Movie.prototype.findGoalShadow = async function () {
+    if (!this.byName.has(WATER_SHADOW)) return [];
+    return [{ fixed: await this._memberIsCurrent(DEEP_SHADOW, await this._deepShadowBitmap()), goalShadow: true }];
+  };
+
+  // The deep-water shadow's BITD: the water shadow with DEEP_TINT applied
+  Movie.prototype._deepShadowBitmap = async function () {
+    const src = this.byName.get(WATER_SHADOW);
+    const srcBitd = this.child(src.id, "BITD");
+    const spec = src.spec;
+    const pitch = be16(spec, 0) & 0x7fff, h = bes16(spec, 6) - bes16(spec, 2), w = bes16(spec, 8) - bes16(spec, 4);
+    const depth = spec[23];
+    if (srcBitd == null || depth !== 32 || pitch !== 4 * w) throw new Error("goal shadow: unexpected bitmap format");
+    const packed = await this.data(srcBitd);
+    const px = packed.length === pitch * h ? packed.slice() : packbits(packed, pitch * h);
+    // 32-bit rows are planar: alpha, red, green, blue. White is the transparent background.
+    for (let y = 0; y < h; y++) {
+      const r = y * pitch;
+      for (let x = 0; x < w; x++) {
+        const c = [px[r + w + x], px[r + 2 * w + x], px[r + 3 * w + x]];
+        if (c[0] === 255 && c[1] === 255 && c[2] === 255) continue;
+        for (let k = 0; k < 3; k++) px[r + (k + 1) * w + x] = Math.round(c[k] * DEEP_TINT[k]);
+      }
+    }
+    return packbitsEncode(px, pitch);
+  };
+
+  Movie.prototype.fixGoalShadow = async function (handler) {
+    if (handler.fixed) return;
+    // one from an earlier version: take it out first, then add it again as this version makes it
+    await this._removeMember(DEEP_SHADOW);
+    const src = this.byName.get(WATER_SHADOW);
+    await this._addMember(castWithName(await this.data(src.id), DEEP_SHADOW), await this._deepShadowBitmap(), src.id);
+    handler.fixed = true;
+  };
+
+  Movie.prototype.unfixGoalShadow = async function (handler) {
+    if (!handler.fixed) return;
+    await this._removeMember(DEEP_SHADOW);
+    handler.fixed = false;
+  };
+
+  // ---------------------------------------------------------------- monster plans
+
+  /* The game already handles plans for monsters ("plan,crab,5", "crab=3" in [inventory]): the plan
+   * resolves through the whole config, the build check has a #monster branch, and building calls
+   * createObject, which makes any "<class>.<name> parent". What's missing is the plan's icon, the
+   * member "monster.<name>.plan" the plans bar shows. WB2 has one, for the lion: its left-facing
+   * sprite. The fix adds the others the same way, shrunk to the size of the other plan icons.
+   * The boulder isn't a buildable model (its recipe is nothing), so it gets none. */
+  const PLAN_TEMPLATE = "building.marina.plan"; // a 32-bit plan icon to copy the member record from
+  const PLAN_MAX_W = 54, PLAN_MAX_H = 40; // the largest plan icons in WB1 (freighter 53 wide, robot lab 40 high)
+  const NO_PLAN = new Set(["generic", "boulder"]);
+
+  // Monsters with a script (the ones a level, or a build, can create)
+  function monsterNames(movie) {
+    const out = [];
+    for (const m of movie.members) {
+      const mm = m.name && /^monster\.(\w+) parent$/.exec(m.name);
+      if (mm && !NO_PLAN.has(mm[1])) out.push(mm[1]);
+    }
+    return [...new Set(out)].sort();
+  }
+
+  // The sideways sprite to make the icon from. Only monsters with their full artwork (a sideways and a
+  // down-facing sprite) get plans: WB2's scorpion and T Rex have just a frame or two and aren't finished.
+  function monsterPose(movie, n) {
+    const has = (x) => movie.byName.has(x) && movie.byName.get(x).type === 1;
+    if (![`monster.${n}.down`, `monster.${n}.down.walk.1`].some(has)) return null;
+    return [`monster.${n}.left`, `monster.${n}.left.walk.1`, `monster.${n}.right`, `monster.${n}.right.walk.1`].find(has) || null;
+  }
+
+  /* A plan icon from a sprite {w, h, rgba} (white/alpha 0 = transparent): drops the one-pixel fringe
+   * the map sprites have from being drawn against grass or water, crops, and shrinks it (by area
+   * averaging) to fit maxW x maxH. Registration point in the middle, like the game's plan icons. */
+  function planIcon(src, maxW = PLAN_MAX_W, maxH = PLAN_MAX_H) {
+    const { w, h } = src;
+    const px = new Uint8ClampedArray(src.rgba);
+    const op = (x, y) => x >= 0 && y >= 0 && x < w && y < h && px[(y * w + x) * 4 + 3] > 0;
+    const fringe = (r, g, b) => (g > 140 && g > r + 70 && g > b + 70) || (r < 70 && g > 160 && b > 200);
+    const drop = [];
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (!op(x, y)) continue;
+      const o = (y * w + x) * 4;
+      if ((!op(x - 1, y) || !op(x + 1, y) || !op(x, y - 1) || !op(x, y + 1)) && fringe(px[o], px[o + 1], px[o + 2])) drop.push(o);
+    }
+    for (const o of drop) px[o + 3] = 0;
+    let x0 = w, y0 = h, x1 = -1, y1 = -1;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (op(x, y)) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+    if (x1 < 0) return null;
+    const cw = x1 - x0 + 1, ch = y1 - y0 + 1;
+    const k = Math.min(1, maxW / cw, maxH / ch);
+    const tw = Math.max(1, Math.round(cw * k)), th = Math.max(1, Math.round(ch * k));
+    const sx = cw / tw, sy = ch / th;
+    const rgba = new Uint8ClampedArray(tw * th * 4);
+    for (let ty = 0; ty < th; ty++) for (let tx = 0; tx < tw; tx++) {
+      let cov = 0, r = 0, g = 0, b = 0;
+      const fx0 = tx * sx, fx1 = fx0 + sx, fy0 = ty * sy, fy1 = fy0 + sy;
+      for (let y = Math.floor(fy0); y < Math.ceil(fy1); y++) for (let x = Math.floor(fx0); x < Math.ceil(fx1); x++) {
+        if (!op(x0 + x, y0 + y)) continue;
+        const a = (Math.min(fx1, x + 1) - Math.max(fx0, x)) * (Math.min(fy1, y + 1) - Math.max(fy0, y));
+        const o = ((y0 + y) * w + x0 + x) * 4;
+        cov += a; r += px[o] * a; g += px[o + 1] * a; b += px[o + 2] * a;
+      }
+      const o = (ty * tw + tx) * 4;
+      if (cov < 0.5 * sx * sy) continue; // stays transparent
+      rgba[o] = Math.round(r / cov); rgba[o + 1] = Math.round(g / cov); rgba[o + 2] = Math.round(b / cov); rgba[o + 3] = 255;
+      if (rgba[o] === 255 && rgba[o + 1] === 255 && rgba[o + 2] === 255) rgba[o + 2] = 254; // white would be see-through
+    }
+    return { w: tw, h: th, rgba, regX: Math.floor(tw / 2), regY: Math.ceil(th / 2) };
+  }
+  WB.planIcon = planIcon;
+
+  // 32-bit BITD (planar rows: alpha, red, green, blue; transparent is white, like the game's plan icons)
+  function bitd32(img) {
+    const { w, h, rgba } = img;
+    const pitch = 4 * w, d = new Uint8Array(pitch * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4, r = y * pitch;
+      const see = rgba[o + 3] === 0;
+      d[r + x] = 255;
+      d[r + w + x] = see ? 255 : rgba[o];
+      d[r + 2 * w + x] = see ? 255 : rgba[o + 1];
+      d[r + 3 * w + x] = see ? 255 : rgba[o + 2];
+    }
+    return packbitsEncode(d, pitch);
+  }
+
+  // A copy of a 32-bit bitmap member's record, renamed and resized for `img`
+  function bitmapCast(templateCast, name, img) {
+    const out = castWithName(templateCast, name);
+    const so = 12 + be32(out, 4);
+    const dv = new DataView(out.buffer, out.byteOffset);
+    dv.setUint16(so, 0x8000 | (4 * img.w));
+    dv.setInt16(so + 2, 0); dv.setInt16(so + 4, 0); dv.setInt16(so + 6, img.h); dv.setInt16(so + 8, img.w);
+    dv.setInt32(so + 14, 0);
+    dv.setInt16(so + 18, img.regY); dv.setInt16(so + 20, img.regX);
+    return out;
+  }
+
+  // The icon this version makes for a monster's plan, or null if it has no sprite to make it from
+  Movie.prototype.monsterPlanIcon = async function (n) {
+    const pose = monsterPose(this, n);
+    const src = pose && (await this.bitmap(pose));
+    return src ? planIcon(src) : null;
+  };
+
+  /* A built monster's health is the inverse of the energy brick it was built with. Units' health is
+   * their energy (pInfo.energy: one 0-100 charge per energy brick in the recipe). A monster placed by
+   * the level has none yet and gets full bricks; a built one gets the charges of the bricks used
+   * (map_display.createObject's #energy). monster.generic's init, after it sets the speed, gets:
+   *   if ilk(me.pInfo[#energy]) = #list then
+   *     speedScale = 1   -- init's only local, done with by then
+   *     repeat while speedScale <= count(me.pInfo[#energy])
+   *       me.pInfo[#energy][speedScale] = max(1, 100 - me.pInfo[#energy][speedScale])
+   *       speedScale = speedScale + 1
+   *     end repeat
+   *   end if
+   * so a nearly empty brick makes a healthy monster and a full one a nearly dead one (at least 1:
+   * at 0 the game treats it as dead, standing still until something hits it). */
+  const HEALTH_NAMES = ["pInfo", "energy", "count", "getAt", "setAt", "ilk", "list", "max"];
+
+  // Bytecode from [op, arg] / {label} / [jump op, label] items; arguments take 1 or 2 bytes as needed
+  function lingo(items) {
+    const BASE = { eq: 0x0f, lteq: 0x0d, sub: 0x06, add: 0x05, pushint8: 0x41, pusharglistnoret: 0x42, pusharglist: 0x43,
+      pushsymb: 0x45, getparam: 0x4b, getlocal: 0x4c, setlocal: 0x52, jmpifz: 0x55, endrepeat: 0x54, extcall: 0x57,
+      getobjprop: 0x61, objcall: 0x67 };
+    const JUMPS = new Set(["jmpifz", "endrepeat"]);
+    const size = (it) => (it.label ? 0 : it.length === 1 ? 1 : JUMPS.has(it[0]) || it[1] > 0xff ? 3 : 2);
+    const labels = {};
+    let p = 0;
+    for (const it of items) { if (it.label) labels[it.label] = p; p += size(it); }
+    const out = [];
+    for (const it of items) {
+      if (it.label) continue;
+      const b = BASE[it[0]];
+      if (it.length === 1) { out.push(b); continue; }
+      const here = out.length;
+      const arg = it[0] === "jmpifz" ? labels[it[1]] - here : it[0] === "endrepeat" ? here - labels[it[1]] : it[1];
+      if (size(it) === 3) out.push(b + 0x40, arg >> 8, arg & 0xff); else out.push(b, arg);
+    }
+    return new Uint8Array(out);
+  }
+
+  function healthCode(names, local) {
+    const n = (x) => names.indexOf(x);
+    const E = [["getparam", 0], ["getobjprop", n("pInfo")], ["pushsymb", n("energy")], ["pusharglist", 2], ["objcall", n("getAt")]];
+    return lingo([
+      ...E, ["pusharglist", 1], ["extcall", n("ilk")], ["pushsymb", n("list")], ["eq"], ["jmpifz", "end"],
+      ["pushint8", 1], ["setlocal", local],
+      { label: "loop" },
+      ["getlocal", local], ...E, ["pusharglist", 1], ["extcall", n("count")], ["lteq"], ["jmpifz", "end"],
+      ...E, ["getlocal", local],
+      ["pushint8", 1], ["pushint8", 100], ...E, ["getlocal", local], ["pusharglist", 2], ["objcall", n("getAt")], ["sub"],
+      ["pusharglist", 2], ["extcall", n("max")],
+      ["pusharglistnoret", 3], ["objcall", n("setAt")],
+      ["getlocal", local], ["pushint8", 1], ["add"], ["setlocal", local],
+      ["endrepeat", "loop"],
+      { label: "end" },
+    ]);
+  }
+
+  // [{id, rec, code, at, template, fixed}]: monster.generic's init, when it has the expected shape
+  Movie.prototype.findMonsterHealth = async function () {
+    const h = await this._findMonsterHealth();
+    return h ? [h] : [];
+  };
+
+  Movie.prototype.fixMonsterHealth = async function (handler) {
+    if (handler.fixed) return;
+    const code = insertCode(handler.code, handler.at, handler.template);
+    await this.replaceHandlerCode(handler.id, handler.rec, code);
+    handler.code = code;
+    handler.fixed = true;
+  };
+
+  Movie.prototype.unfixMonsterHealth = async function (handler) {
+    if (!handler.fixed) return;
+    const code = cutCode(handler.code, handler.at, handler.at + handler.template.length);
+    await this.replaceHandlerCode(handler.id, handler.rec, code);
+    handler.code = code;
+    handler.fixed = false;
+  };
+
+  /* monster.generic's init (the script with "wander"), where its speed is set: {id, rec, code, at,
+   * template, fixed} */
+  Movie.prototype._findMonsterHealth = async function () {
+    const scripts = new Set();
+    const all = [];
+    for await (const h of this.handlers()) { all.push(h); if (h.name === "wander") scripts.add(h.id); }
+    for (const h of all) {
+      if (h.name !== "init" || !scripts.has(h.id) || HEALTH_NAMES.some((x) => h.names.indexOf(x) < 0)) continue;
+      const ins = decode(h.code);
+      // starts "speedScale = (80 + random(40)) / 100.0", then me.pBuild.speed = ...
+      const first = ins.findIndex((i) => i.op === 0x52); // setlocal
+      const set = ins.findIndex((i) => i.op === 0x62); // setobjprop
+      if (ins[0].op !== OP.pushint8 || ins[0].arg !== 80 || first < 0 || set < 0) continue;
+      const at = ins[set].p + ins[set].len;
+      const template = healthCode(h.names, ins[first].arg);
+      const fixed = h.code.length >= at + template.length && template.every((b, i) => h.code[at + i] === b);
+      return { ...h, at, template, fixed, monsterHealth: true };
+    }
+    return null;
+  };
+
+  /* [{fixed, monsterPlans, targets: [{name, member, icon, bitd}]}]: the monsters that get a plan icon.
+   * A monster whose icon came with the game (WB2's lion) is left alone. */
+  Movie.prototype.findMonsterPlans = async function () {
+    if (!this.byName.has(PLAN_TEMPLATE)) return [];
+    const targets = [];
+    for (const n of monsterNames(this)) {
+      const icon = await this.monsterPlanIcon(n);
+      if (!icon) continue;
+      const member = `monster.${n}.plan`, bitd = bitd32(icon);
+      if (this.byName.has(member) && !(await this._memberHasBitmap(member, bitd))) continue;
+      targets.push({ name: n, member, icon, bitd });
+    }
+    if (!targets.length) return [];
+    let fixed = true;
+    for (const t of targets) if (!(await this._memberIsCurrent(t.member, t.bitd))) fixed = false;
+    return [{ fixed, monsterPlans: true, targets }];
+  };
+
+  Movie.prototype.fixMonsterPlans = async function (handler) {
+    if (handler.fixed) return;
+    const tpl = this.byName.get(PLAN_TEMPLATE);
+    const tplCast = await this.data(tpl.id);
+    for (const t of handler.targets) {
+      await this._removeMember(t.member);
+      await this._addMember(bitmapCast(tplCast, t.member, t.icon), t.bitd, tpl.id);
+    }
+    handler.fixed = true;
+  };
+
+  Movie.prototype.unfixMonsterPlans = async function (handler) {
+    for (const t of handler.targets) await this._removeMember(t.member);
+    handler.fixed = false;
+  };
+
   /* Put "jmp <to>" in front of code[at]: jumps that crossed `at` get 3 longer, ones that landed on
    * `at` now land on the jmp. */
   function jumpInFront(old, at, to) {
@@ -1427,6 +1903,10 @@
         lower.some((m) => m.t === 1 && (m.n === `${cls}.${n}` || m.n.startsWith(`${cls}.${n}.`)))));
     }
     g.musicTracks = this.musicTracks();
+    // terrains a goal can stand on: the ones with a "goal.shadow.<terrain>" member to draw under it
+    g.goalShadows = new Set(this.members.map((m) => m.name && /^goal\.shadow\.(.+)$/.exec(m.name)).filter(Boolean).map((m) => m[1]));
+    // models a plan can be for: the ones with a "<class>.<name>.plan" icon for the plans bar
+    g.planIcons = new Set(this.members.filter((m) => m.type === 1).map((m) => m.name && /^(?:vehicle|building|monster)\.(\w+)\.plan$/.exec(m.name)).filter(Boolean).map((m) => m[1].toLowerCase()));
     g.resources = ["red", "yellow", "blue", "green", "white", "wheel", "energy"].filter(
       (r) => this.byName.has(`resource.${r}`) || this.byName.has(`resource.${r}.1`)
     );
@@ -1556,6 +2036,14 @@
     return L.join("\n");
   }
 
+  // A plan whose model has no plans-bar icon: the game stops with a script error when it's picked up
+  function planIconError(game, name, what) {
+    const monster = game.config && game.config.monster && name in game.config.monster && name !== "boulder";
+    return monster
+      ? `${what} for ${name} needs the "Monster plans" game patch (Game tab).`
+      : `${what} for ${name} has no plan icon in this game, which causes a script error; pick another model.`;
+  }
+
   /* Problems the game would choke on, plus gameplay sanity checks. */
   function validateLevel(lv, game) {
     const errs = [], warns = [];
@@ -1575,6 +2063,14 @@
       const at = `(${x + 1},${y + 1})`;
       if (p[0] === "goal") { goals++; if (/^collect\b/.test(p[1] || "")) collect = true; }
       if (p[0] === "bonusgoal") { bonus++; if (/^collect\b/.test(p[1] || "")) collect = true; }
+      if ((p[0] === "goal" || p[0] === "bonusgoal") && game.goalShadows && !game.goalShadows.has(itemTerrain(p))) {
+        const t = itemTerrain(p);
+        errs.push(t === "water_undiggable"
+          ? `The ${p[0] === "goal" ? "goal" : "bonus goal"} at ${at} is on deep water, which needs the "Deep water" game patch (Game tab).`
+          : `The ${p[0] === "goal" ? "goal" : "bonus goal"} at ${at} is on ${t}, which the game has no goal shadow for (script error); use ${[...game.goalShadows].join(" or ")}.`);
+      }
+      if ((p[0] === "plan" || p[0] === "waterplan") && game.planIcons && !game.planIcons.has((p[1] || "").toLowerCase()))
+        errs.push(planIconError(game, p[1], `The plan at ${at}`));
       if (p[0] === "whirlpool") whirl.set(p[1], (whirl.get(p[1]) || 0) + 1);
       if (p[0] === "unit" || p[0] === "waterunit") {
         if (game.placeable && !(game.placeable[p[1]] && game.placeable[p[1]].has(p[2]))) {
@@ -1589,6 +2085,7 @@
           warns.push(`${p[2]} at ${at} is placed on ${p[3]} but can only use: ${ts.join(", ")}.`);
       }
     }));
+    if (game.planIcons) for (const inv of lv.inventory) if (!game.planIcons.has(inv.name.toLowerCase())) errs.push(planIconError(game, inv.name, "The starting plan"));
     if (goals === 0) errs.push("The map has no mission goal.");
     if (collect && captureTiles === 0) warns.push('A "collect" goal needs capture-zone tiles (":") to deliver to.');
     for (const [id, n] of whirl) if (n !== 2) warns.push(`Whirlpool ${id} appears ${n} time${n === 1 ? "" : "s"}; whirlpools work in pairs.`);

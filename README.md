@@ -13,8 +13,10 @@ Saving a .exe applies the following patches to a game. Each one can be switched 
  - ESC can open/close the menu
  - W A S D replace the functionality of Up/Down/Left/Right
  - Q is now a shortcut for "take apart"
- - Objects that can exist in deep water can be placed in deep water.
+ - Objects that can exist in deep water can be placed in deep water, including goals
  - Each level can chose which music track plays (instead of random)
+ - Plans for monsters (except the boulder)
+ - Built monsters have inverse health compared to the energy brick used
  - On saving World 1 map 1, the Tutorial map is moved to map 999
  - Reaching a goal or bonus goal no longer freezes the game: progress is saved when the mission ends (End/Restart) instead
  - Cheat (off unless you tick it): every mission and world is unlocked from the start
