@@ -14,14 +14,8 @@
     return e;
   };
 
-  // Projection used by the game (map_display.posToLoc): 50px cells, each row shifted 25px left.
-  const CELL = 50, SKEW = 25;
-  // Where the game draws things relative to a tile's position, measured from the real game
-  const OBJ_DX = 10, OBJ_DY = 16; // vehicles and monsters (buildings have no offset)
-  // resource.generic: up to 4 brick sprites, biggest amount first; 8px lower on water
-  const PILE_SPOTS = [[22, 7], [17, 18], [12, 28], [6, 39]];
-  const PILE_WATER_DY = 8;
-  const VIEW_W = 12, VIEW_H = 9; // tiles visible in the game window
+  // Map projection (scene.js): 50px cells, each row shifted 25px left; the game window shows 12×9 tiles
+  const { CELL, SKEW, VIEW_W, VIEW_H, cellOrigin } = WBScene;
 
   // Editor preferences, kept between visits (wbe.* in localStorage)
   const prefs = {
@@ -112,6 +106,11 @@
     S.sprites.clear();
     S.mockMap = null;
     S.levels = game.levels.map((l) => ({ ...l, lv: null, dirty: false, undo: [], redo: [] }));
+    S.scene = WBScene.create({
+      game, sprite: spriteNow, hasSprite, showGrid: () => S.showGrid,
+      // a monster's icon counts while the Monster plans patch is ticked (it's added to the game on save)
+      planIcon: (s) => (S.monsterPlanIcons && S.monsterPlanIcons.has(s) ? S.patchOn && S.patchOn.monsterPlans : hasSprite(s)),
+    });
     S.textEdits = new Map();
     S.imported = null;
     S.tutorialHook = await movie.findTutorialHook();
@@ -235,54 +234,27 @@
     return S.movie.byName.has(name) && S.movie.byName.get(name).type === 1;
   }
 
-  // Which bitmap represents a unit, plan or pile on the map
-  // models shown facing right in the editor (everything else faces down, or right if it has no down)
-  const FACE_RIGHT = new Set(["duck", "forklift", "freighter", "snail", "steamshovel", "tugboat", "guard_tower"]);
-  function unitSpriteName(cls, name, water) {
-    const n = name === "repairbot" ? "repairBot" : name;
-    const c = [];
-    if (FACE_RIGHT.has(name)) {
-      if (water) c.push(`${cls}.${n}.water.right`);
-      c.push(`${cls}.${n}.right`);
-    }
-    if (water) c.push(`${cls}.${n}.water.down`, `${cls}.${n}.water.right`, `${cls}.${n}.water.left`);
-    c.push(`${cls}.${n}.down`, `${cls}.${n}.down.stand`, `${cls}.${n}`, `${cls}.${n}.1`, `${cls}.${n}.right`,
-      `${cls}.${n}.left`, `${cls}.${n}.down.walk.1`, `${cls}.${n}.right.walk.1`, `${cls}.${n}.frozen`, `${cls}.${n}.plan`);
-    if (name === "defender2" || name === "defender3") c.push(...unitSpriteCandidates(cls, "defender"));
-    return c.find(hasSprite) || null;
-  }
-  function unitSpriteCandidates(cls, n) { return [`${cls}.${n}.down`, `${cls}.${n}`]; }
-
-  function planSpriteName(name) {
-    const n = name === "repairbot" ? "repairBot" : name;
-    // a monster's icon counts while the Monster plans patch is ticked (it's added to the game on save)
-    const icon = (s) => (S.monsterPlanIcons && S.monsterPlanIcons.has(s) ? S.patchOn && S.patchOn.monsterPlans : hasSprite(s));
-    return [`vehicle.${n}.plan`, `building.${n}.plan`, `monster.${n}.plan`].find(icon) || null;
-  }
+  // Which bitmap represents a unit, plan or pile on the map (scene.js decides; it's shared with the native editor)
+  const unitSpriteName = (cls, name, water) => S.scene.unitSpriteName(cls, name, water);
+  const planSpriteName = (name) => S.scene.planSpriteName(name);
+  const pileSpriteName = (res, amount) => S.scene.pileSpriteName(res, amount);
+  const terrainSprite = (ch, p) => S.scene.terrainSprite(ch, p);
+  const displayName = (name) => S.scene.displayName(name);
+  const describeParts = (p) => S.scene.describeParts(p);
+  const recipeOf = (name) => S.scene.recipeOf(name);
+  const recipeText = (recipe) => S.scene.recipeText(recipe);
+  const cellLabel = (x, y) => S.scene.cellLabel(lvl(), x, y);
   // Models a plan can be for: vehicles, buildings and (with their icons) monsters, never the boulder
   function planModels() {
     return [...placeable("vehicle"), ...placeable("building"), ...placeable("monster").filter((n) => n !== "boulder")].filter(planSpriteName);
   }
 
-  function pileSpriteName(res, amount) {
-    if (res === "energy" || res === "wheel") return `resource.${res}`;
-    // pPileSetup.countversions: 1 -> .1, 2+ -> .2, 6+ -> .3, 13+ -> .4
-    const step = amount >= 13 ? 4 : amount >= 6 ? 3 : amount >= 2 ? 2 : 1;
-    return [`resource.${res}.${step}`, `resource.${res}.1`, `resource.${res}`].find(hasSprite) || null;
-  }
 
   function placeable(cls) { return (S.game.units[cls] || []).filter((n) => S.game.placeable[cls].has(n)); }
 
   function unitClassOf(name) {
     for (const cls of ["vehicle", "building", "monster"]) if ((S.game.units[cls] || []).includes(name)) return cls;
     return "vehicle";
-  }
-  function displayName(name) {
-    for (const cls of ["vehicle", "building", "monster"]) {
-      const c = S.game.config[cls] && S.game.config[cls][name];
-      if (c && c.name) return c.name;
-    }
-    return name.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
   }
 
   // ------------------------------------------------------------------ level state
@@ -613,15 +585,7 @@
 
   // ------------------------------------------------------------------ rendering
 
-  function cellOrigin(x, y) { return [x * CELL - y * SKEW, y * CELL]; }
-  function screenToCell(sx, sy) {
-    const v = S.view;
-    const wx = (sx - v.x) / v.zoom, wy = (sy - v.y) / v.zoom;
-    const y = Math.floor(wy / CELL);
-    const ly = wy - y * CELL;
-    const x = Math.floor((wx + y * SKEW + ly / 2) / CELL);
-    return [x, y];
-  }
+  const screenToCell = (sx, sy) => WBScene.screenToCell(S.view, sx, sy);
   function inMap(x, y) { const lv = lvl(); return lv && y >= 0 && y < lv.grid.length && x >= 0 && x < lv.grid[0].length; }
 
   function resizeCanvas() {
@@ -629,7 +593,7 @@
     const dpr = window.devicePixelRatio || 1;
     canvas.width = Math.round(r.width * dpr);
     canvas.height = Math.round(r.height * dpr);
-    draw();
+    render(true); // resizing has just cleared the canvas: redraw before it's shown blank
   }
 
   function fitView() {
@@ -637,12 +601,8 @@
     if (!lv) return;
     const r = canvas.getBoundingClientRect();
     const h = lv.grid.length, w = h ? lv.grid[0].length : 0;
-    const mapW = w * CELL + h * SKEW + 40, mapH = h * CELL + 60;
-    const z = S.zoom || Math.max(0.2, Math.min(2, Math.min(r.width / mapW, r.height / mapH)));
-    S.view.zoom = z;
-    $("#zoomLabel").textContent = Math.round(z * 100) + "%";
-    S.view.x = (r.width - (w * CELL - h * SKEW) * z) / 2;
-    S.view.y = (r.height - h * CELL * z) / 2 - 10 * z;
+    Object.assign(S.view, WBScene.fitView(w, h, r.width, r.height, S.zoom));
+    $("#zoomLabel").textContent = Math.round(S.view.zoom * 100) + "%";
     draw();
   }
 
@@ -663,15 +623,6 @@
     return true;
   }
 
-  // Centered on (x, y) and shrunk to fit, ignoring the registration point
-  // (plans-menu pictures are registered for the plans panel, not the map)
-  function drawFitted(c, name, x, y, maxW, maxH, maxScale = 1) {
-    const s = name && spriteNow(name);
-    if (!s) return false;
-    const k = Math.min(maxScale, maxW / s.w, maxH / s.h);
-    c.drawImage(s.img, Math.round(x - (s.w * k) / 2), Math.round(y - (s.h * k) / 2), s.w * k, s.h * k);
-    return true;
-  }
 
   function goalObjective(target) {
     if (!target || target === "anything") return "Anything";
@@ -680,10 +631,6 @@
     return displayName(target);
   }
 
-  function drawPlanCount(c, p, x, y) {
-    const [ox, oy] = cellOrigin(x, y);
-    badge(c, "×" + (p[2] || 1), ox - 4, oy + 40, "#fff", "#111", "#111");
-  }
 
   function badge(c, text, x, y, bg = "#111c", fg = "#fff", outline = null) {
     c.font = "600 11px Fredoka, system-ui, sans-serif";
@@ -699,14 +646,6 @@
     c.fillText(text, x, y + 0.5);
   }
 
-  function terrainSpriteForCell(lv, c) {
-    return terrainSprite(c.t, c.item >= 0 ? lv.items[c.item].parts : null);
-  }
-  function terrainSprite(ch, p) {
-    if (p) return p[0] === "whirlpool" ? "terrain.water_whirlpool" : "terrain." + WB.itemTerrain(p);
-    const t = S.game.terrain[ch];
-    return t ? "terrain." + t : "terrain.normal";
-  }
 
   // Faint copy of the copied tiles under the cursor, where a click would place them
   function drawPasteGhost() {
@@ -729,47 +668,31 @@
     ctx.setLineDash([]);
   }
 
-  // withCount false leaves out a plan's ×N badge, so the map can draw them all on top afterwards
   function drawObject(c, p, x, y, withCount = true) {
-    const [ox, oy] = cellOrigin(x, y);
-    const cx = ox + OBJ_DX, cy = oy + OBJ_DY;
-    const base = p[0].replace(/^water/, "");
-    const water = WB.itemIsWater(p);
-    if (base === "unit") {
-      // The game offsets only vehicles and monsters; buildings sit at the tile's own loc
-      const [ux, uy] = p[1] === "building" ? [ox, oy] : [cx, cy];
-      if (!drawSprite(c, unitSpriteName(p[1], p[2], water), ux, uy)) badge(c, p[2], ox + 13, oy + 25);
-    } else if (base === "plan") {
-      // The game shows only a blueprint (plan.generic); the editor puts the model's plans-menu
-      // picture behind it, with the paper in the tile's bottom-right corner
-      if (!drawFitted(c, planSpriteName(p[1]), ox + 11, oy + 18, 50, 40, 1.6)) badge(c, p[1], ox + 11, oy + 18);
-      drawSprite(c, "plan.generic", ox + 5, oy + 14);
-      if (withCount) drawPlanCount(c, p, x, y);
-    } else if (base === "pile") {
-      const res = [];
-      for (let i = 1; i + 1 < p.length; i += 2) if (+p[i + 1] > 0) res.push([p[i], +p[i + 1]]);
-      res.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-      const wy = water ? PILE_WATER_DY : 0;
-      res.slice(0, PILE_SPOTS.length).forEach(([r, n], i) => {
-        drawSprite(c, pileSpriteName(r, n), ox + PILE_SPOTS[i][0], oy + PILE_SPOTS[i][1] + wy);
-      });
-    } else if (base === "goal" || base === "bonusgoal") {
-      // The game puts a shadow at the tile's loc (lower on water, whose surface sits lower)
-      // and floats the goal above it; here the goal hovers centered over its shadow
-      const shadowName = water || WB.isWaterTerrain(p[2]) ? "goal.shadow.water" : "goal.shadow.normal";
-      const shadow = spriteNow(shadowName);
-      let gx = ox + 13, gy = oy + 26;
-      if (shadow) {
-        drawSprite(c, shadowName, ox, oy);
-        gx = ox - shadow.regX + shadow.w / 2;
-        gy = oy - shadow.regY + shadow.h / 2 - 2;
+    drawCommands(c, S.scene.object(p, x, y, withCount));
+  }
+
+  // Draw scene.js commands (see there) on a canvas context set to map pixels
+  function drawCommands(c, cmds) {
+    for (const k of cmds) {
+      switch (k[0]) {
+        case "img": c.drawImage(spriteNow(k[1]).img, k[2], k[3]); break;
+        case "imgs": c.drawImage(spriteNow(k[1]).img, k[2], k[3], k[4], k[5]); break;
+        case "badge": badge(c, k[1], k[2], k[3], k[4], k[5], k[6]); break;
+        case "face":
+          facePath(c, k[1], k[2], k[3]);
+          if (k[4]) { c.fillStyle = k[4]; c.fill(); }
+          if (k[5]) {
+            if (k[8]) c.setLineDash(k[8]);
+            c.strokeStyle = k[5];
+            c.lineWidth = k[7] ? k[6] / S.view.zoom : k[6];
+            c.stroke();
+            if (k[8]) c.setLineDash([]);
+          }
+          break;
+        case "alpha": c.globalAlpha = k[1]; break;
       }
-      const g = spriteNow(base === "goal" ? "goal.goal" : "goal.bonus");
-      if (g) c.drawImage(g.img, Math.round(gx - g.w / 2), Math.round(gy - g.h));
-      else badge(c, base === "goal" ? "!" : "★", gx, gy - 12);
-    } else if (base === "whirlpool") {
-      badge(c, "⟳ " + p[1], ox + 13, oy + 25, "#0a4f8cdd");
-    } else badge(c, p[0], ox + 13, oy + 25, "#a00d");
+    }
   }
 
   // Faint copy of the brush object under the cursor, wherever a click would put it down
@@ -789,64 +712,51 @@
     ctx.globalAlpha = 1;
   }
 
-  function draw() {
-    const dpr = window.devicePixelRatio || 1;
+  /* Drawing happens at most once per frame: draw() redraws everything, drawOverlay() only what
+   * follows the mouse (hover outline, brush ghost, popups), over a copy of the map kept from the
+   * last full draw. Anything that changes the map, the view or the canvas size calls draw().
+   * (A second canvas stacked over the map instead of the copy measured no faster, and bigger.) */
+  const base = document.createElement("canvas"), bctx = base.getContext("2d");
+  let pending = 0; // 0 nothing, 1 overlay, 2 everything
+  function draw() { schedule(2); }
+  function drawOverlay() { schedule(1); }
+  function schedule(level) {
+    if (!pending) requestAnimationFrame(() => { const full = pending === 2; pending = 0; render(full); });
+    pending = Math.max(pending, level);
+  }
+
+  function render(full) {
+    const lv = lvl();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    const lv = lvl();
     if (!lv) return;
+    if (full || base.width !== canvas.width || base.height !== canvas.height) renderMap(lv);
+    ctx.drawImage(base, 0, 0);
+    const dpr = window.devicePixelRatio || 1, v = S.view;
+    ctx.setTransform(dpr * v.zoom, 0, 0, dpr * v.zoom, dpr * v.x, dpr * v.y);
+    ctx.imageSmoothingEnabled = v.zoom < 1;
+    renderOverlay(lv);
+  }
+
+  // Tiles and objects, into the base canvas; only rows and columns near the window are drawn
+  // (sprites reach well outside their tile: a margin of 200 map pixels covers the tallest)
+  const DRAW_MARGIN = 200;
+  function renderMap(lv) {
+    if (base.width !== canvas.width || base.height !== canvas.height) { base.width = canvas.width; base.height = canvas.height; }
+    const ctx = bctx;
+    const dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, base.width, base.height);
     const v = S.view;
     ctx.setTransform(dpr * v.zoom, 0, 0, dpr * v.zoom, dpr * v.x, dpr * v.y);
     ctx.imageSmoothingEnabled = v.zoom < 1;
     const h = lv.grid.length, w = h ? lv.grid[0].length : 0;
-
-    // terrain, back to front
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const c = lv.grid[y][x];
-        const [ox, oy] = cellOrigin(x, y);
-        const tname = terrainSpriteForCell(lv, c);
-        if (tname === "terrain.hole") {
-          facePath(ctx, x, y, 2);
-          ctx.setLineDash([4, 4]); ctx.strokeStyle = "#ffffff30"; ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
-          continue;
-        }
-        if (!drawSprite(ctx, tname, ox, oy)) {
-          facePath(ctx, x, y);
-          ctx.fillStyle = "#3b7d3b";
-          ctx.fill();
-        }
-        if (c.item < 0 && S.game.terrain[c.t] == null) badge(ctx, c.t, ox + 13, oy + 25, "#a00d");
-      }
-    }
-    if (S.showGrid) {
-      ctx.strokeStyle = "#00000026";
-      ctx.lineWidth = 1 / v.zoom;
-      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-        if (S.game.terrain[lv.grid[y][x].t] === "hole" && lv.grid[y][x].item < 0) continue;
-        facePath(ctx, x, y);
-        ctx.stroke();
-      }
-    }
-    // objects; while one is being dragged, its old tile (and a tile it would swap with) shows faded
+    const range = WBScene.visibleRange(w, h, v, canvas.width / dpr, canvas.height / dpr, DRAW_MARGIN);
+    // while an object is being dragged, its old tile (and a tile it would swap with) shows faded
     const mv = S.drag && S.drag.move;
     const moving = mv && String(mv.from) !== String(mv.to);
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const c = lv.grid[y][x];
-      if (c.item < 0) continue;
-      const faded = moving && (String([x, y]) === String(mv.from) || String([x, y]) === String(mv.to));
-      if (faded) ctx.globalAlpha = 0.3;
-      drawObject(ctx, lv.items[c.item].parts, x, y, false);
-      ctx.globalAlpha = 1;
-    }
-    // plan counts go over everything, including objects on the rows in front
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const c = lv.grid[y][x];
-      if (c.item < 0 || lv.items[c.item].parts[0].replace(/^water/, "") !== "plan") continue;
-      if (moving && (String([x, y]) === String(mv.from) || String([x, y]) === String(mv.to))) ctx.globalAlpha = 0.3;
-      drawPlanCount(ctx, lv.items[c.item].parts, x, y);
-      ctx.globalAlpha = 1;
-    }
+    const faded = moving ? (x, y) => String([x, y]) === String(mv.from) || String([x, y]) === String(mv.to) : null;
+    drawCommands(ctx, S.scene.map(lv, range, faded));
     if (moving) {
       const ok = canMove(mv.from, mv.to);
       const [a, b] = movedParts(mv.from, mv.to);
@@ -860,6 +770,12 @@
         ctx.strokeStyle = "#ff5d5d"; ctx.lineWidth = 2 / v.zoom; ctx.stroke();
       }
     }
+  }
+
+  // What follows the mouse and the selection, drawn over the map each frame
+  function renderOverlay(lv) {
+    const v = S.view;
+    const h = lv.grid.length, w = h ? lv.grid[0].length : 0;
     if (!S.drag || S.drag.op) drawGhost(lv);
     drawPasteGhost();
     // start view
@@ -955,14 +871,7 @@
     piece(70, BODY - C, 17, C + 6, Math.round(w / 2) - 8, h - C, 17, C + 6);
   }
 
-  function startViewRect(lv, w, h) {
-    // mirrors map_display.readmap: scroll so the center tile sits mid-window
-    const c = lv.center || [Math.floor(w / 2) + 1, Math.floor(h / 2)];
-    let left = Math.trunc(c[0] - VIEW_W / 2 + 1), top = Math.trunc(c[1] - VIEW_H / 2);
-    left = Math.max(1, Math.min(left, w - VIEW_W + 1));
-    top = Math.max(1, Math.min(top, h - VIEW_H + 1));
-    return { left: left - 1, top: top - 1, c };
-  }
+  const startViewRect = (lv, w, h) => WBScene.startViewRect(lv, w, h);
 
   function drawStartView(lv, w, h) {
     const { left, top, c } = startViewRect(lv, w, h);
@@ -1022,42 +931,8 @@
       : t === "select" ? "pointer" : "crosshair";
   }
 
-  function cellLabel(x, y) {
-    const lv = lvl();
-    const c = lv.grid[y][x];
-    let s = `(${x + 1}, ${y + 1}) `;
-    if (c.item >= 0) {
-      const p = lv.items[c.item].parts;
-      s += p[2] === "boulder" && p[0].replace(/^water/, "") === "unit" ? "I rock!" : describeParts(p);
-      // plans also list the bricks their model needs
-      const recipe = p[0].replace(/^water/, "") === "plan" && recipeOf(p[1]);
-      if (recipe) s += `: needs ${recipeText(recipe)}`;
-    } else s += WB.TERRAIN_LABELS[S.game.terrain[c.t]] || S.game.terrain[c.t] || `unknown "${c.t}"`;
-    return s;
-  }
 
-  /* What a unit is, for people: the game files every unit you control under "vehicle", but its
-   * config gives animals and robots a kind (WB2 picks their click sound by it) */
-  function unitKind(cls, name) {
-    const info = S.game.config && S.game.config[cls] && S.game.config[cls][String(name).toLowerCase()];
-    return (cls === "vehicle" && info && info.kind) || cls;
-  }
 
-  function describeParts(p) {
-    const base = p[0].replace(/^water/, "");
-    const onWater = WB.itemIsWater(p) ? " (on water)" : "";
-    if (base === "unit") return `${displayName(p[2])}: ${unitKind(p[1], p[2])}${onWater}`;
-    if (base === "plan") return `Plan: ${displayName(p[1])} ×${p[2]}${onWater}`;
-    if (base === "pile") {
-      const r = [];
-      for (let i = 1; i + 1 < p.length; i += 2) r.push(`${p[i + 1]} ${p[i]}`);
-      return `Brick pile: ${r.join(", ")}${onWater}`;
-    }
-    if (base === "goal") return `Mission goal: ${p[1]}${onWater}`;
-    if (base === "bonusgoal") return `Bonus goal: ${p[1]}${onWater}`;
-    if (base === "whirlpool") return `Whirlpool #${p[1]}`;
-    return p.join(",");
-  }
 
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointerdown", (e) => {
@@ -1161,7 +1036,8 @@
       S.hover = nh;
       $("#hoverText").textContent = inside ? cellLabel(x, y) : "";
       updateCursor();
-      draw();
+      // a stroke or a moved object changes the map; just hovering (or a rectangle drag) doesn't
+      if (S.drag && !S.drag.rect) draw(); else drawOverlay();
     }
   });
   const endDrag = () => {
@@ -1203,7 +1079,7 @@
   };
   canvas.addEventListener("pointerup", endDrag);
   canvas.addEventListener("pointercancel", endDrag);
-  canvas.addEventListener("pointerleave", () => { S.hover = null; $("#hoverText").textContent = ""; draw(); });
+  canvas.addEventListener("pointerleave", () => { S.hover = null; $("#hoverText").textContent = ""; drawOverlay(); });
   canvas.addEventListener("wheel", (e) => {
     if (!lvl()) return;
     e.preventDefault();
@@ -1257,7 +1133,7 @@
   window.addEventListener("blur", () => { spaceDown = false; modDown = false; updateCursor(); draw(); });
   const trackMod = (e) => {
     const on = e.altKey || e.ctrlKey;
-    if (on !== modDown) { modDown = on; if (lvl()) draw(); }
+    if (on !== modDown) { modDown = on; if (lvl()) drawOverlay(); }
   };
   window.addEventListener("keydown", trackMod);
   window.addEventListener("keyup", (e) => { if (e.key === "Alt") e.preventDefault(); trackMod(e); });
@@ -1376,14 +1252,6 @@
     markSwatches();
   }
 
-  function recipeOf(name) {
-    for (const cls of ["vehicle", "building", "monster"]) {
-      const c = S.game.config[cls] && S.game.config[cls][name];
-      if (c && c.recipe) return c.recipe;
-    }
-    return null;
-  }
-  const recipeText = (recipe) => Object.entries(recipe).map(([k, v]) => `${v} ${k}`).join(", ");
 
   function unitTooltip(cls, n) {
     if (n === "boulder") return "I rock!";
