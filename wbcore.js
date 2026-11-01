@@ -68,8 +68,10 @@
     const out = new Response(new Blob([u8]).stream().pipeThrough(stream));
     return new Uint8Array(await out.arrayBuffer());
   }
-  const inflate = (u8) => streamThrough(u8, new DecompressionStream("deflate"));
-  const deflate = (u8) => streamThrough(u8, new CompressionStream("deflate"));
+  // A native host (the QuickJS build) has no compression streams and passes zlib in as WB_ZLIB
+  const zlib = root && root.WB_ZLIB;
+  const inflate = zlib ? async (u8) => zlib.inflate(u8) : (u8) => streamThrough(u8, new DecompressionStream("deflate"));
+  const deflate = zlib ? async (u8) => zlib.deflate(u8) : (u8) => streamThrough(u8, new CompressionStream("deflate"));
   WB.inflate = inflate;
   WB.deflate = deflate;
 
@@ -145,8 +147,9 @@
   function findEmbeddedMovie(u8) {
     const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
     let found = -1;
-    for (let i = 0; i + 12 <= u8.length; i++) {
-      if (u8[i] === 0x58 && u8[i + 1] === 0x46 && u8[i + 2] === 0x49 && u8[i + 3] === 0x52 &&
+    // indexOf jumps to each "X" natively (a byte-by-byte JS loop is slow in an interpreter like QuickJS)
+    for (let i = u8.indexOf(0x58); i >= 0 && i + 12 <= u8.length; i = u8.indexOf(0x58, i + 1)) {
+      if (u8[i + 1] === 0x46 && u8[i + 2] === 0x49 && u8[i + 3] === 0x52 &&
           u8[i + 8] === 0x4d && u8[i + 9] === 0x44 && u8[i + 10] === 0x47 && u8[i + 11] === 0x46 &&
           i + 8 + dv.getUint32(i + 4, true) <= u8.length) found = i;
     }
@@ -206,14 +209,18 @@
       for (let i = 0; i < used; i++) {
         const o = 12 + 12 * i;
         const sid = kv.getUint32(o, true), parent = kv.getUint32(o + 4, true);
-        const tag = latin1(key.subarray(o + 8, o + 12)).split("").reverse().join("");
+        const tag = String.fromCharCode(key[o + 11], key[o + 10], key[o + 9], key[o + 8]); // stored byte-reversed
         if (!this.children.has(parent)) this.children.set(parent, {});
         this.children.get(parent)[tag] = sid;
       }
       this.members = [];
       for (const e of this.entries) {
         if (e.tag !== "CASt") continue;
-        const m = parseCast(await this.data(e.id));
+        // a record's parse is kept until its bytes are replaced (setData always stores a new array),
+        // so re-indexing after adding or removing a member only parses what changed
+        const d = await this.data(e.id);
+        let m = parsedCast.get(d);
+        if (!m) { m = parseCast(d); parsedCast.set(d, m); }
         m.id = e.id;
         this.members.push(m);
       }
@@ -340,6 +347,8 @@
   const be16 = (u8, o) => (u8[o] << 8) | u8[o + 1];
   const bes16 = (u8, o) => (be16(u8, o) << 16) >> 16;
 
+  // member records already parsed, by their bytes (see Movie._index)
+  const parsedCast = new WeakMap();
   function parseCast(d) {
     const type = be32(d, 0), infoLen = be32(d, 4), specLen = be32(d, 8);
     const info = d.subarray(12, 12 + infoLen);
@@ -1465,8 +1474,10 @@
     return null;
   };
 
+  // After members were added or removed: the cache only loses resources that are gone (their ids
+  // can be handed out again), everything else is still what the file holds
   Movie.prototype._reindexMembers = async function () {
-    this.cache.clear();
+    for (const id of this.cache.keys()) if (!this.byId.has(id)) this.cache.delete(id);
     await this._index();
   };
 
@@ -1477,16 +1488,29 @@
     const m = this.byName.get(name);
     if (!m || !(await this._memberHasBitmap(name, want))) return false;
     const ids = [m.id, ...Object.values(this.children.get(m.id) || {})];
-    let keysSorted = true;
-    await this._readKeys((rows) => { for (let i = 1; i < rows.length; i++) if (rows[i].parent < rows[i - 1].parent) keysSorted = false; });
-    return keysSorted && ids.every((id) => id <= this.abmpUnk2);
+    return (await this._keysSorted()) && ids.every((id) => id <= this.abmpUnk2);
+  };
+
+  // Are the KEY* rows in parent order? (worked out once per version of KEY*)
+  const keysSortedFor = new WeakMap();
+  Movie.prototype._keysSorted = async function () {
+    const key = await this.data(this.entries.find((e) => e.tag === "KEY*").id);
+    if (!keysSortedFor.has(key)) {
+      const kv = new DataView(key.buffer, key.byteOffset, key.byteLength);
+      let sorted = true;
+      for (let i = 1, n = kv.getUint32(8, true); i < n && sorted; i++) sorted = kv.getUint32(16 + 12 * i, true) >= kv.getUint32(16 + 12 * (i - 1), true);
+      keysSortedFor.set(key, sorted);
+    }
+    return keysSortedFor.get(key);
   };
 
   Movie.prototype._memberHasBitmap = async function (name, want) {
     const m = this.byName.get(name);
     const bitd = m ? this.child(m.id, "BITD") : null;
     const have = bitd != null ? await this.data(bitd) : null;
-    return !!have && have.length === want.length && have.every((b, i) => b === want[i]);
+    if (!have || have.length !== want.length) return false;
+    for (let i = 0; i < want.length; i++) if (have[i] !== want[i]) return false;
+    return true;
   };
 
   /* Resource ids for new resources. The ABMP header's second number is the movie's highest
@@ -2273,7 +2297,14 @@
     L.push("");
     if (lv.center) L.push(`center=${lv.center[0]},${lv.center[1]}`);
     L.push("", "[mapitems]");
-    const defs = [...used.values()].sort((a, b) => a.key.localeCompare(b.key));
+    // Keys are single letters and digits: digits first, then letters ignoring case, lowercase first.
+    // (That's what localeCompare gives in V8, spelled out so every JS engine writes the same file:
+    // without locale data QuickJS's localeCompare puts all capitals before lowercase.)
+    const keyOrder = (a, b) => {
+      const x = a.toLowerCase(), y = b.toLowerCase();
+      return x < y ? -1 : x > y ? 1 : a === b ? 0 : a === x ? -1 : 1;
+    };
+    const defs = [...used.values()].sort((a, b) => keyOrder(a.key, b.key));
     for (const d of defs) L.push(`${d.key}=${d.parts.join(",")}`);
     L.push("", "[inventory]");
     for (const inv of lv.inventory) L.push(`${inv.name}=${inv.count}`);
