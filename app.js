@@ -1036,10 +1036,17 @@
     return s;
   }
 
+  /* What a unit is, for people: the game files every unit you control under "vehicle", but its
+   * config gives animals and robots a kind (WB2 picks their click sound by it) */
+  function unitKind(cls, name) {
+    const info = S.game.config && S.game.config[cls] && S.game.config[cls][String(name).toLowerCase()];
+    return (cls === "vehicle" && info && info.kind) || cls;
+  }
+
   function describeParts(p) {
     const base = p[0].replace(/^water/, "");
     const onWater = WB.itemIsWater(p) ? " (on water)" : "";
-    if (base === "unit") return `${displayName(p[2])}: ${p[1]}${onWater}`;
+    if (base === "unit") return `${displayName(p[2])}: ${unitKind(p[1], p[2])}${onWater}`;
     if (base === "plan") return `Plan: ${displayName(p[1])} ×${p[2]}${onWater}`;
     if (base === "pile") {
       const r = [];
