@@ -118,7 +118,10 @@
   // ---------------------------------------------------------------- levels, undo
 
   function ensureParsed(e) {
-    if (!e.lv) e.lv = WB.parseLevel(e.text, S.game.terrain);
+    if (!e.lv) {
+      e.lv = WB.parseLevel(e.text, S.game.terrain);
+      e.clean = snapshot(e.lv);
+    }
     return e.lv;
   }
   function selectLevel(i) {
@@ -132,8 +135,9 @@
     S.textFor = null;
     S.flags |= F_LEVEL | F_SCENE;
   }
-  function snapshot() {
-    const lv = lvl();
+  // The level's editable state; e.clean holds it as last loaded or saved, so a level is only marked
+  // as changed while it differs from that (undoing back to it clears the mark)
+  function snapshot(lv = lvl()) {
     return JSON.stringify({ name: lv.name, center: lv.center, items: lv.items, inventory: lv.inventory, mapExtra: lv.mapExtra, other: lv.other, grid: lv.grid });
   }
   function pushUndo() {
@@ -144,7 +148,7 @@
   }
   function changed() {
     const e = L();
-    e.dirty = true;
+    e.dirty = snapshot(e.lv) !== e.clean;
     e.textCache = null;
     S.textFor = null;
     refreshHover();
@@ -329,7 +333,7 @@
     if (ctrl) {
       if (k === "z") { shift ? redo() : undo(); return true; }
       if (k === "y") { redo(); return true; }
-      if (k === "s") { if (S.movie) openSave(); return true; }
+      if (k === "s") { if (S.movie) saveNow(); return true; }
       // pick up the last copied tiles again (they can go into another level too)
       if (k === "v" && S.clip && lvl()) { setTool("select"); startPasting(); return true; }
       if (k === "o") { requestOpen(); return true; }
@@ -368,6 +372,7 @@
    *   4 alpha a
    *   5 tiles x0 y0 x1 y1 stroke lineWidth screenPx dashOn dashOff   (outline of a block of tiles)
    *   6 popup tx ty heading target   (the game's goal popup over tile tx, ty)
+   *   7 number text x y               (a whirlpool's pair number: big outlined text centered on x, y)
    * Sprites that aren't loaded yet are left out; after loadPending() the scene is worth asking for again. */
   function pack(cmds) {
     const strs = [], ids = new Map();
@@ -382,6 +387,7 @@
         case "face": nums.set([3, c[1], c[2], c[3], str(c[4]), str(c[5]), c[6], c[7] ? 1 : 0, c[8] ? c[8][0] : 0, c[8] ? c[8][1] : 0], o); break;
         case "alpha": nums.set([4, c[1]], o); break;
         case "popup": nums.set([6, c[1], c[2], str(c[3]), str(c[4])], o); break;
+        case "number": nums.set([7, str(c[1]), c[2], c[3]], o); break;
         case "tiles": nums.set([5, c[1], c[2], c[3], c[4], str(c[5]), c[6], c[7] ? 1 : 0, c[8] ? c[8][0] : 0, c[8] ? c[8][1] : 0], o); break;
       }
     });
@@ -550,7 +556,7 @@
     setStatus(`Reading ${basename(path)}…`);
     try {
       await open(NATIVE.readFile(path), path, want);
-      setStatus(`Opened ${basename(path)}.`);
+      setStatus("");
     } catch (e) {
       setStatus("Couldn't open that file: " + e.message);
       alert("Couldn't open that file.\n\n" + e.message);
@@ -575,6 +581,7 @@
     const mb = (bytes.length / 1048576).toFixed(2);
     if (exe) {
       setPref("patches" + S.game.edition, E.markSaved());
+      for (const l of S.levels) if (l.lv) l.clean = snapshot(l.lv);
       S.filePath = path;
       S.fileName = basename(path);
       S.textFor = null;
@@ -586,6 +593,15 @@
     if (!S.movie) return;
     S.modal = { kind: "save", issues: E.saveProblems() };
   }
+  // Save: straight over the open Launcher.exe, no questions; the save dialog only comes up when
+  // something in the levels would break the game
+  function saveNow() {
+    if (!S.movie) return;
+    if (E.saveProblems().length) { openSave(); return; }
+    later(() => save("exe", S.filePath));
+  }
+  const saveAs = () => NATIVE.fileDialog("saveExe", true, dirname(S.filePath), "exe");
+  const exportDcr = () => NATIVE.fileDialog("saveDcr", true, dirname(S.filePath), "dcr");
   // the host asks before closing the window
   const unsaved = () => !!S.movie && E.unsaved();
   function askQuit() { confirm("You have unsaved changes. Quit anyway?", "Quit", () => NATIVE.quit()); }
@@ -676,7 +692,7 @@
     UI.sameLine(UI.availWidth() - 22 + UI.cursorX());
     if (UI.smallButton("«")) { S.levelsShown = false; setPref("levelsShown", false); }
     UI.tooltip("Hide the level list (L)");
-    const footer = S.game ? 4 : 1;
+    const footer = S.game ? 5 : 1;
     UI.beginChild("list", 0, -UI.frameHeight() * footer - 8, false);
     let world = null;
     S.levels.forEach((l, i) => {
@@ -686,13 +702,18 @@
       }
       const num = l.world === 999 ? "–" : String(l.mission);
       if (UI.levelRow(l.member, num, E.listName(l), l.dirty, i === S.cur)) selectLevel(i);
-      UI.tooltip(l.dirty ? `${l.member} (unsaved changes)` : l.member);
     });
     UI.endChild();
     if (S.game) {
       UI.textColored(MUTED, `World Builder${S.game.edition === 2 ? " 2" : ""} · ${S.levels.length} levels · editor ${NATIVE.version()}`, false);
-      if (UI.button("Save…", -1, 0, "accent")) openSave();
-      UI.tooltip("Write Launcher.exe with all your changes, or export the .dcr (Ctrl+S)");
+      if (UI.button(`Save ${S.fileName}`, -1, 0, "accent")) saveNow();
+      UI.tooltip(`Write your changes into ${S.fileName} (Ctrl+S). The first save keeps the original as ${S.fileName}.orig.`);
+      const half = (UI.availWidth() - 6) / 2;
+      if (UI.button("Save as…", half)) { if (E.saveProblems().length) openSave(); else saveAs(); }
+      UI.tooltip("Save the game with your changes to another .exe");
+      UI.sameLine(0, 6);
+      if (UI.button("Export .dcr…", half)) { if (E.saveProblems().length) openSave(); else exportDcr(); }
+      UI.tooltip(`Write just the movie (${E.dcrName()}, the browser version) without saving ${S.fileName}`);
       if (UI.button("Import .dcr…", -1)) requestImport();
       UI.tooltip("Replace the game in this Launcher.exe with a .dcr movie (written on the next save)");
     }
@@ -723,12 +744,6 @@
     flow(UI.width("Redo", "button"));
     if (UI.button("Redo", 0, 0, "ghost")) redo();
     UI.tooltip("Ctrl+Y or Ctrl+Shift+Z");
-    flow(UI.width("Grid", "checkbox"));
-    const g = UI.checkbox("Grid", S.showGrid);
-    if (g !== S.showGrid) { S.showGrid = g; setPref("showGrid", g); S.flags |= F_SCENE; }
-    flow(UI.width("Start view", "checkbox"));
-    const v = UI.checkbox("Start view", S.showView);
-    if (v !== S.showView) { S.showView = v; setPref("showView", v); }
   }
 
   // ---------------------------------------------------------------- side panel
@@ -785,10 +800,12 @@
   function palettePanel() {
     const cur = E.brushId(S.brush), ground = S.brush.ground ? "t:" + S.brush.ground : null;
     UI.heading("Terrain");
+    // labelled by name like the objects; no tooltip
     swatches(cached("terrain", () => E.terrainPalette()).map(([ch, t]) => ({
-      id: "t:" + ch, sprite: t === "hole" ? "" : "terrain." + t, label: ch, title: `${WB.TERRAIN_LABELS[t] || t}: "${ch}"`,
+      id: "t:" + ch, sprite: t === "hole" ? "" : "terrain." + t,
+      label: (WB.TERRAIN_LABELS[t] || t).replace(/\s*\(.*\)$/, ""), title: "",
       on: cur === "t:" + ch || ground === "t:" + ch, onClick: () => setBrushTerrain(ch),
-    })), 52);
+    })), 64);
     UI.heading("Objects");
     for (const [k, lbl] of WBEdit.CATS) {
       if (UI.toggle(lbl, S.objCat === k, false, "pill")) S.objCat = k;
@@ -797,12 +814,16 @@
     UI.newLine();
     const { items, note: msg } = cached("pal" + S.objCat, () => E.objectPalette(S.objCat));
     if (msg) note(msg);
-    swatches(items.map((it) => ({
-      id: E.brushId({ kind: "object", ...it.o }), sprite: it.sprite, label: it.label, title: it.title,
-      on: cur === E.brushId({ kind: "object", ...it.o }), onClick: () => setBrushObject(it.o),
-      // right-click on a plan: a pile of the bricks that model needs
-      onRight: it.o.type === "plan" ? () => recipeBrush(it.o.name) : null,
-    })), 64);
+    swatches(items.map((it) => {
+      // right-click on a plan or a model with a recipe: a pile of the bricks that model needs
+      const recipe = (it.o.type === "plan" || (S.objCat === "model" && it.o.type === "unit")) && E.recipeRows(it.o.name);
+      return {
+        id: E.brushId({ kind: "object", ...it.o }), sprite: it.sprite, label: it.label,
+        title: recipe ? it.title + "\nRight-click for a pile of its bricks" : it.title,
+        on: cur === E.brushId({ kind: "object", ...it.o }), onClick: () => setBrushObject(it.o),
+        onRight: recipe ? () => recipeBrush(it.o.name) : null,
+      };
+    }), 64);
     brushOptions();
   }
 
@@ -897,16 +918,19 @@
     UI.setNextItemWidth(90);
     const cy = UI.inputInt("##cy", center[1], 0, 999);
     if (cx !== center[0] || cy !== center[1]) edit(() => { lv.center = [cx, cy]; });
-    UI.sameLine();
+    // the buttons go on the same row when there's room, otherwise below
+    UI.flow(UI.width("Auto", "button"));
     if (UI.button("Auto")) edit(() => { lv.center = null; });
     UI.tooltip("Let the game center the map");
-    UI.sameLine();
+    UI.flow(UI.width("Pick on map", "button"));
     if (UI.toggle("Pick on map", S.tool === "start", false)) {
       if (S.tool !== "start") S.prevTool = S.tool;
       setTool("start");
       setStatus("Click the map where the camera should start (Esc cancels).");
     }
     UI.tooltip("Click a tile on the map to start the camera there (Esc cancels)");
+    const v = UI.checkbox("Show the start view on the map", S.showView);
+    if (v !== S.showView) { S.showView = v; setPref("showView", v); }
 
     UI.heading("Map size");
     const fillChar = S.brush.kind === "terrain" ? S.brush.char : "@";
@@ -922,6 +946,8 @@
     const hit = UI.resizer(m.nums, m.strs, MOCK_COLS, MOCK_ROWS, `${w} × ${h}`);
     if (hit) rs(hit.slice(0, -1), hit.endsWith("+") ? 1 : -1);
     note("New rows and columns are filled with the selected terrain brush (or holes).");
+    const g = UI.checkbox("Show the grid", S.showGrid);
+    if (g !== S.showGrid) { S.showGrid = g; setPref("showGrid", g); S.flags |= F_SCENE; }
 
     UI.heading("Starting plans (inventory)");
     const all = E.planModels();
@@ -946,6 +972,7 @@
     if (UI.button("Revert to saved")) {
       confirm("Throw away your changes to this level?", "Revert", () => {
         e.lv = WB.parseLevel(e.text, S.game.terrain);
+        e.clean = snapshot(e.lv);
         e.dirty = false;
         e.undo = []; e.redo = [];
         e.textCache = null;
@@ -1081,10 +1108,10 @@
       if (UI.button(`Save ${S.fileName}`, 0, 0, "accent")) { close(); later(() => save("exe", S.filePath)); }
       UI.tooltip(`Write over ${S.filePath} (the first save keeps the original as ${S.fileName}.orig)`);
       UI.flow(UI.width("Save as…", "button"));
-      if (UI.button("Save as…")) { close(); NATIVE.fileDialog("saveExe", true, dirname(S.filePath), "exe"); }
+      if (UI.button("Save as…")) { close(); saveAs(); }
       const ex = `Export ${E.dcrName()}…`;
       UI.flow(UI.width(ex, "button"));
-      if (UI.button(ex)) { close(); NATIVE.fileDialog("saveDcr", true, dirname(S.filePath), "dcr"); }
+      if (UI.button(ex)) { close(); exportDcr(); }
       UI.endDisabled();
       UI.flow(UI.width("Cancel", "button"));
       if (UI.button("Cancel") || UI.keyPressed("escape")) close();

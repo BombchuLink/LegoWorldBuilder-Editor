@@ -1,9 +1,9 @@
 // WorldBuilder Level Editor, native build: the window, the map and the event loop. The game file
 // handling, what the map looks like, the editing rules and the panels come from the editor's own
-// JS (wbcore.js, scene.js, edit.js, native/js/editor.js) running in QuickJS; this draws it with
+// JS (wbcore.js, scene.js, edit.js, editor.js, all in js/) running in QuickJS; this draws it with
 // SDL3 + Dear ImGui.
 //
-//   worldbuilder-native [Launcher.exe]
+//   worldbuilder-editor [Launcher.exe]
 //   WBE_RENDERER=software|opengl|direct3d11|direct3d|vulkan  pick SDL's renderer
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
 #include "js_host.h"
@@ -40,11 +41,11 @@ struct Js {
 
   explicit Js(wbe::UiHost* ui) {
     wbe::bind_ui(host.ctx(), ui);
-    host.load_editor_script("wb1monsters.js");
-    host.load_editor_script("wbcore.js");
-    host.load_editor_script("scene.js");
-    host.load_editor_script("edit.js");
-    host.load_editor_script("native/js/editor.js");
+    host.load_editor_script("js/wb1monsters.js");
+    host.load_editor_script("js/wbcore.js");
+    host.load_editor_script("js/scene.js");
+    host.load_editor_script("js/edit.js");
+    host.load_editor_script("js/editor.js");
     ne = host.global("NE");
   }
   ~Js() { JS_FreeValue(host.ctx(), ne); }
@@ -134,10 +135,16 @@ struct Atlas {
     std::vector<uint8_t> clear(static_cast<size_t>(SIZE) * SIZE * 4, 0);
     SDL_UpdateTexture(t, nullptr, clear.data(), SIZE * 4);
     SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureScaleMode(t, mode);
     pages.push_back({t});
     return place(r, w, h, at_x, at_y);
   }
-  void set_scale(SDL_ScaleMode m) { for (Page& p : pages) SDL_SetTextureScaleMode(p.tex, m); }
+  // nearest (sharp pixels) normally; linear when zoomed far out, where nearest shimmers
+  SDL_ScaleMode mode = SDL_SCALEMODE_NEAREST;
+  void set_scale(SDL_ScaleMode m) {
+    mode = m;
+    for (Page& p : pages) SDL_SetTextureScaleMode(p.tex, m);
+  }
   void clear() {
     for (Page& p : pages) SDL_DestroyTexture(p.tex);
     pages.clear();
@@ -163,6 +170,7 @@ void apply_style();
 struct App : wbe::UiHost {
   SDL_Window* window = nullptr;
   SDL_Renderer* renderer = nullptr;
+  SDL_Texture* logo = nullptr;  // the app icon, for the welcome screen
   std::optional<Js> js;
   ImFont* ui_font = nullptr;
   ImFont* badge_font = nullptr;
@@ -173,7 +181,6 @@ struct App : wbe::UiHost {
   std::unordered_map<std::string, Sprite> sprites;
   Atlas atlas;
   std::vector<SDL_Texture*> big;  // sprites too big for an atlas page
-  bool smooth = false;  // sprites are filtered (zoomed out) or sharp (zoomed in)
   View view;
   float user_zoom = 0;  // zoom chosen by the user; 0 fits each map to the window
   bool show_view = true;
@@ -431,7 +438,7 @@ struct App : wbe::UiHost {
         } else if ((s.tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h))) {
           SDL_UpdateTexture(s.tex, nullptr, rgba, w * 4);
           SDL_SetTextureBlendMode(s.tex, SDL_BLENDMODE_BLEND);
-          SDL_SetTextureScaleMode(s.tex, smooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+          SDL_SetTextureScaleMode(s.tex, atlas.mode);
           big.push_back(s.tex);
         }
       }
@@ -442,20 +449,19 @@ struct App : wbe::UiHost {
     js->free(list);
   }
 
+  // Sharp pixels down to 75% zoom; smoothing below that
+  void set_smooth(bool on) {
+    SDL_ScaleMode m = on ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST;
+    if (m == atlas.mode) return;
+    atlas.set_scale(m);
+    for (SDL_Texture* t : big) SDL_SetTextureScaleMode(t, m);
+  }
+
   void clear_sprites() {
     atlas.clear();
     for (SDL_Texture* t : big) SDL_DestroyTexture(t);
     big.clear();
     sprites.clear();
-  }
-
-  // Like the canvas: smoothing only when zoomed out
-  void set_smooth(bool on) {
-    if (on == smooth) return;
-    smooth = on;
-    SDL_ScaleMode m = on ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST;
-    atlas.set_scale(m);
-    for (SDL_Texture* t : big) SDL_SetTextureScaleMode(t, m);
   }
 
   void fit_view() {
@@ -549,7 +555,7 @@ struct App : wbe::UiHost {
   }
 
   void draw_scene(ImDrawList* dl, const Scene& sc) {
-    set_smooth(view.zoom < 1);
+    set_smooth(view.zoom < 0.75f);
     float alpha = 1;
     const ImVec2 lo = map_min, hi{map_min.x + map_size.x, map_min.y + map_size.y};
     auto visible = [&](ImVec2 a, ImVec2 b) { return b.x >= lo.x && a.x <= hi.x && b.y >= lo.y && a.y <= hi.y; };
@@ -614,6 +620,23 @@ struct App : wbe::UiHost {
           break;
         }
         case 4: alpha = static_cast<float>(n[o + 1]); break;
+        case 7: {
+          // big white text with a dark outline, so the art under it still shows
+          const std::string& t = sc.strs[static_cast<size_t>(n[o + 1])];
+          float size = 20 * view.zoom;
+          ImVec2 ts = badge_font->CalcTextSizeA(size, FLT_MAX, 0, t.c_str());
+          ImVec2 c = to_screen(static_cast<float>(n[o + 2]), static_cast<float>(n[o + 3]));
+          ImVec2 tp{std::round(c.x - ts.x / 2), std::round(c.y - ts.y / 2)};
+          if (!visible(tp, {tp.x + ts.x, tp.y + ts.y})) break;
+          float r = std::max(1.0f, 1.5f * view.zoom);
+          ImU32 dark = with_alpha(IM_COL32(0x06, 0x2a, 0x4d, 235));
+          for (int k = 0; k < 8; k++) {
+            float a = k * 0.785398f;
+            dl->AddText(badge_font, size, {tp.x + std::cos(a) * r, tp.y + std::sin(a) * r}, dark, t.c_str());
+          }
+          dl->AddText(badge_font, size, tp, with_alpha(IM_COL32_WHITE), t.c_str());
+          break;
+        }
         case 6:
           draw_goal_popup(dl, static_cast<int>(n[o + 1]), static_cast<int>(n[o + 2]), sc.strs[static_cast<size_t>(n[o + 3])], sc.strs[static_cast<size_t>(n[o + 4])]);
           break;
@@ -750,6 +773,7 @@ struct App : wbe::UiHost {
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+    ImGui::SetNextWindowScroll({0, -1});  // never scrolled sideways (Shift+wheel)
     ImGui::Begin("##main", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
     ImGui::PopStyleVar();
     keys();
@@ -767,6 +791,7 @@ struct App : wbe::UiHost {
 
     // level list
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {6, 6});
+    ImGui::SetNextWindowScroll({0, -1});  // never scrolled sideways (Shift+wheel)
     ImGui::BeginChild("levels", {left_w, 0}, ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
     draw_js("drawLevels");
     ImGui::EndChild();
@@ -775,17 +800,24 @@ struct App : wbe::UiHost {
 
     // toolbar, map, status bar
     float mid_w = std::max(100.0f, ImGui::GetContentRegionAvail().x - side_w - grip);
+    ImGui::SetNextWindowScroll({0, -1});  // never scrolled sideways (Shift+wheel)
     ImGui::BeginChild("middle", {mid_w, 0}, 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::Dummy({0, 2});
     ImGui::Indent(8);
     draw_js("drawToolbar");
     if (has_level) {
       auto bw = [](const char* l) { return ImGui::CalcTextSize(l).x + ImGui::GetStyle().FramePadding.x * 2; };
-      wbe::ui_flow_item(bw("-") + bw("100%") + bw("+") + bw("Fit") + 3 * ImGui::GetStyle().ItemSpacing.x);
+      // right-aligned: on the toolbar's row when it fits there, otherwise on a row of its own
+      std::string pct = std::to_string(static_cast<int>(std::lround(view.zoom * 100))) + "%";
+      float zw = bw("-") + bw(pct.c_str()) + bw("+") + bw("Fit") + 3 * ImGui::GetStyle().ItemSpacing.x;
+      float right = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x - 8;  // the toolbar's 8px indent, mirrored
+      bool fits = ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + zw <= right;
+      if (fits) ImGui::SameLine();
+      ImGui::SetCursorScreenPos({std::max(ImGui::GetCursorScreenPos().x, right - zw), ImGui::GetCursorScreenPos().y});
       if (ImGui::Button("-")) zoom_at(map_size.x / 2, map_size.y / 2, 0.8f);
       ImGui::SetItemTooltip("Zoom out");
       ImGui::SameLine();
-      if (ImGui::Button((std::to_string(static_cast<int>(std::lround(view.zoom * 100))) + "%").c_str())) {
+      if (ImGui::Button(pct.c_str())) {
         zoom_at(map_size.x / 2, map_size.y / 2, 1 / view.zoom);
         view.x = std::round(view.x);
         view.y = std::round(view.y);
@@ -806,7 +838,10 @@ struct App : wbe::UiHost {
     ImVec2 avail = ImGui::GetContentRegionAvail();
     map_min = ImGui::GetCursorScreenPos();
     map_size = {avail.x, std::max(50.0f, avail.y - status_h)};
-    ImGui::InvisibleButton("map", map_size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
+    // with no level the map is only a backdrop: an InvisibleButton here would take the clicks meant
+    // for the welcome screen's Open button, which is drawn over it
+    if (has_level) ImGui::InvisibleButton("map", map_size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
+    else ImGui::Dummy(map_size);
     if (has_level && !view_touched && (map_size.x != fitted_size.x || map_size.y != fitted_size.y)) fit_pending = true;
     if (fit_pending && has_level) { fit_view(); fit_pending = false; }
     map_input();
@@ -822,7 +857,17 @@ struct App : wbe::UiHost {
     }
     dl->PopClipRect();
     if (!has_level) {
-      // welcome
+      // welcome: the icon, the name, an Open button and the version
+      if (!logo && (logo = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, 128, 128))) {
+        SDL_UpdateTexture(logo, nullptr, kIconRgba128, 128 * 4);
+        SDL_SetTextureBlendMode(logo, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureScaleMode(logo, SDL_SCALEMODE_LINEAR);
+      }
+      if (logo) {
+        float sz = std::min(128.0f, 96 * ui_scale);
+        ImVec2 a{map_min.x + (map_size.x - sz) / 2, map_min.y + map_size.y / 2 - 62 * ui_scale - sz};
+        ImGui::GetWindowDrawList()->AddImage(static_cast<ImTextureID>(reinterpret_cast<intptr_t>(logo)), a, {a.x + sz, a.y + sz});
+      }
       const char* t = "WorldBuilder Level Editor";
       ImVec2 ts = ImGui::CalcTextSize(t);
       ImGui::SetCursorScreenPos({map_min.x + (map_size.x - ts.x) / 2, map_min.y + map_size.y / 2 - 50});
@@ -867,6 +912,7 @@ struct App : wbe::UiHost {
       if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) run("setSideWidth", {js->num(360)});
       ImGui::SameLine(0, 0);
       ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {8, 6});
+      ImGui::SetNextWindowScroll({0, -1});  // never scrolled sideways (Shift+wheel)
       ImGui::BeginChild("side", {0, 0}, ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
       draw_js("drawSide");
       ImGui::EndChild();
@@ -1129,9 +1175,9 @@ int main(int argc, char** argv) {
   ImGuiIO& io = ImGui::GetIO();
   io.IniFilename = nullptr;
   app.set_ui_scale(SDL_GetWindowDisplayScale(app.window));
-  // Fredoka (native/fonts), and a system font for the symbols it lacks
+  // Fredoka (fonts/), and a system font for the symbols it lacks
   // (✓ ⚠ ● …): DejaVu on Linux, Segoe UI Symbol on Windows (7 and later), else Arial
-  const std::string fonts = wbe::JsHost::editor_dir() + "/native/fonts/";
+  const std::string fonts = wbe::JsHost::editor_dir() + "/fonts/";
   const char* windir = std::getenv("WINDIR");
   const std::string win = std::string(windir ? windir : "C:\\Windows") + "\\Fonts\\";
   const std::vector<std::string> ui_main = {fonts + "Fredoka-Regular.ttf"}, bold_main = {fonts + "Fredoka-SemiBold.ttf"};
@@ -1172,7 +1218,13 @@ int main(int argc, char** argv) {
   Uint64 quit_at = bench ? SDL_GetTicks() + static_cast<Uint64>(std::atof(bench) * 1000) : 0;
   for (bool running = true; running;) {
     SDL_Event e;
-    bool got = frames > 0 || sweep ? SDL_PollEvent(&e) : SDL_WaitEventTimeout(&e, quit_at ? 100 : -1);
+    // ImGui shows a tooltip once the mouse has rested on an item for a moment; while one is on its way,
+    // wake up to draw it instead of sleeping until the mouse moves again
+    const ImGuiContext& g = *ImGui::GetCurrentContext();
+    bool tooltip_due = g.HoverItemDelayId != 0 && g.HoverItemDelayTimer < 0.6f;
+    int wait = quit_at ? 100 : tooltip_due ? 30 : -1;
+    bool got = frames > 0 || sweep ? SDL_PollEvent(&e) : SDL_WaitEventTimeout(&e, wait);
+    if (!got && tooltip_due && frames <= 0) frames = 1;
     while (got) {
       ImGui_ImplSDL3_ProcessEvent(&e);
       if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && e.window.windowID == SDL_GetWindowID(app.window))) {
@@ -1233,6 +1285,7 @@ int main(int argc, char** argv) {
   if (quit_at) std::printf("status: %s\n", app.status_text().c_str());
 
   app.clear_sprites();
+  if (app.logo) SDL_DestroyTexture(app.logo);
   app.js.reset();
   ImGui_ImplSDLRenderer3_Shutdown();
   ImGui_ImplSDL3_Shutdown();

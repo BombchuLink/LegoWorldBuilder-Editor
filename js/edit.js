@@ -1,4 +1,4 @@
-/* The editing rules (used by native/js/editor.js, kept free of any UI so they can be tested on
+/* The editing rules (used by editor.js, kept free of any UI so they can be tested on
  * their own): what the brush puts down and what can stand where, moving, filling, copying and pasting tiles,
  * resizing a map, a level's music and mission title, the game patches, and building the movie to
  * save. No DOM; needs wbcore.js (WB).
@@ -122,7 +122,7 @@
         if (placeable("monster").includes("boulder")) addUnit("monster", "boulder");
         add({ type: "goal", goal: "goal" }, "goal.goal", "Mission goal", "Mission goal: bring the required model here");
         add({ type: "goal", goal: "bonusgoal" }, "goal.bonus", "Bonus goal", "Bonus goal: optional harder target");
-        add({ type: "whirlpool" }, "terrain.water_whirlpool", "Whirlpool", "Whirlpools teleport water units; place two with the same number");
+        add({ type: "whirlpool" }, "whirlpool.generic.whirl.1", "Whirlpool", "Whirlpools teleport water units; place two with the same number");
       }
       return { items: out, note };
     }

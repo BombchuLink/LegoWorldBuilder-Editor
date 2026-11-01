@@ -38,7 +38,7 @@ licenses() {  # <dir> <build dir>
   cp "$b/quickjs-src/LICENSE" "$d/QuickJS-ng.txt"
   cp "$b/zlib-src/LICENSE" "$d/zlib.txt"
   cp fonts/OFL.txt "$d/Fredoka (SIL Open Font License).txt"
-  cp ../LICENSE "$1/LICENSE.txt"  # the editor's own (MIT-0)
+  cp LICENSE "$1/LICENSE.txt"  # the editor's own (MIT-0)
 }
 stage() {  # <name> <build dir>
   local d="$out/$1"

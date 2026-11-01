@@ -1,3 +1,6 @@
 # never commit the games themselves
 *.exe
 *.dcr
+build/
+build-*/
+dist*/

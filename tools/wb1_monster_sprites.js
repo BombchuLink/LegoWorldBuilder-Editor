@@ -1,11 +1,11 @@
-// Make editor/wb1monsters.js, the T Rex and scorpion artwork the "T Rex and scorpion" patch adds to
+// Make editor/js/wb1monsters.js, the T Rex and scorpion artwork the "T Rex and scorpion" patch adds to
 // World Builder 2 (which has their scripts and stats but only their frozen sprites):
 //   node wb1_monster_sprites.js "World Builder/worldbuilder/worldbuilder.dcr"
 // WB1's sprites (16-bit T Rex, 8-bit scorpion with its own palette) are converted to 32-bit the
 // way WB2 stores its map sprites: white with alpha 0 where they're see-through.
 const fs = require("fs");
 const path = require("path");
-const WB = require("./wbcore.js");
+const WB = require("../js/wbcore.js");
 
 const MONSTERS = ["trex", "scorpion"];
 
@@ -42,7 +42,7 @@ ${Object.entries(out).map(([k, v]) => `    ${JSON.stringify(k)}: ${JSON.stringif
   else root.WB1_MONSTER_SPRITES = SPRITES;
 })(typeof self !== "undefined" ? self : this);
 `;
-  const dest = path.join(__dirname, "wb1monsters.js");
+  const dest = path.join(__dirname, "..", "js", "wb1monsters.js");
   fs.writeFileSync(dest, js);
   console.log(`${names.length} sprites (${bytes} bytes of bitmap data) -> ${dest}`);
 })().catch((e) => { console.error(e.message); process.exit(1); });

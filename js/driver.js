@@ -7,7 +7,7 @@
  *   edit       every level renamed and one tile changed, and a mission title */
 (function (root) {
   "use strict";
-  const WB = root.WB || (typeof require !== "undefined" && require("../../wbcore.js"));
+  const WB = root.WB || (typeof require !== "undefined" && require("./wbcore.js"));
 
   // [find, apply, remove] in the order buildMovie applies the Game tab's patches
   const PATCHES = [

@@ -1,5 +1,5 @@
 // wbe-core <Launcher.exe> <resave|patch-on|patch-off|edit> [out.exe]
-// Runs the editor's wbcore.js in QuickJS through native/js/driver.js (the same steps Node runs in
+// Runs the editor's wbcore.js in QuickJS through js/driver.js (the same steps Node runs in
 // test/compare.js) and prints the driver's report.
 #include <chrono>
 #include <cstdio>
@@ -17,9 +17,9 @@ int main(int argc, char** argv) {
   try {
     auto t0 = std::chrono::steady_clock::now();
     wbe::JsHost js;
-    js.load_editor_script("wb1monsters.js");
-    js.load_editor_script("wbcore.js");
-    js.load_editor_script("native/js/driver.js");
+    js.load_editor_script("js/wb1monsters.js");
+    js.load_editor_script("js/wbcore.js");
+    js.load_editor_script("js/driver.js");
     auto t1 = std::chrono::steady_clock::now();
 
     auto input = wbe::read_file(argv[1]);

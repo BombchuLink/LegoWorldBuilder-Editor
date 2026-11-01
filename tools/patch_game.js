@@ -13,7 +13,7 @@
 //  - reaching a goal no longer freezes the game while progress is saved (it's saved when the mission ends)
 // Writes <file>.orig-<n> as a backup first. Fixes that are already in a file are left alone.
 const fs = require("fs");
-const WB = require("./wbcore.js");
+const WB = require("../js/wbcore.js");
 
 async function pending(mv) {
   const handlers = await mv.findKeyHandlers();

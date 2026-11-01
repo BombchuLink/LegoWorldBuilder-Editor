@@ -1,8 +1,8 @@
-# The editor program
+# Building the editor
 
-The editor's JavaScript, `wbcore.js` (game files, levels, patches), `scene.js` (what the map looks
-like), `edit.js` (the editing rules) and `js/editor.js` (the editor's state, tools and panels),
-runs in [QuickJS](https://github.com/quickjs-ng/quickjs), a small embeddable JavaScript engine. A
+The editor's JavaScript in `js/`, `wbcore.js` (game files, levels, patches), `scene.js` (what the
+map looks like), `edit.js` (the editing rules) and `editor.js` (the editor's state, tools and
+panels), runs in [QuickJS](https://github.com/quickjs-ng/quickjs), a small embeddable JavaScript engine. A
 C++ front end with SDL3 and Dear ImGui draws it.
 
 ## Building
@@ -83,60 +83,3 @@ Windows XP and Vista would need SDL2 instead of SDL3 (SDL3 starts at Windows 7).
 folder, not suggest a file name. Settings (grid, the last level, the patch choices last saved) are
 kept in `prefs.json` in SDL's preference folder (`~/.local/share/worldbuilder/editor/`,
 `%APPDATA%\worldbuilder\editor\`). The UI follows the display's scale.
-
-Environment variables:
-
-| Variable | Effect |
-|---|---|
-| `WBE_RENDERER` | SDL renderer (`software`, `opengl`, `direct3d11`, `direct3d`…). The default (OpenGL on Linux) measured best; `vulkan` busy-waits, and `opengles2`/`gpu` use about twice the memory. If the chosen or default one fails, it tries Direct3D 11, Direct3D 9, OpenGL, then software. |
-| `WBE_LEVEL=map2.8` | Opens that level first. |
-| `WBE_ZOOM=1` | Fixed zoom instead of fitting. |
-| `WBE_SWEEP=1` | Benchmark (see below). |
-| `WBE_BENCH=<seconds>`, `WBE_SHOT=<file.bmp>` | Quit after that long, saving the last frame. |
-| `WBE_DIALOG_ANSWER=<path>` | Answer every file dialog with that path (for tests). |
-
-## Testing
-
-- `build/wbe-core <Launcher.exe> <resave|patch-on|patch-off|edit> [out.exe]` opens and saves a
-  game the way the editor does (`js/driver.js`). `node test/compare.js <out dir> <Launcher.exe>...`
-  runs the same steps in Node (V8) and in QuickJS and checks the files they write are
-  byte-identical, for both games, patched and unpatched (`WBE_CORE=build-linux/wbe-core` checks a
-  release build). `DETAIL=1` lists the slow steps.
-- `WBE_SWEEP=1` (below) measures memory and CPU.
-- The GUI can be driven with `xdotool`; `WBE_DIALOG_ANSWER` stands in for the file dialogs.
-
-## How it fits together
-
-- `src/js_host.cpp`: QuickJS with what a browser would give `wbcore.js`: zlib (`WB_ZLIB`, which
-  `wbcore.js` uses when present) and `TextEncoder`; UTF-8 file paths on every system.
-- `js/editor.js`: the editor's state,
-  the tools' mouse and key handling, undo, files and saving, and the panels. It hands the host the
-  map (and what follows the mouse) as `scene.js` draw commands packed into a `Float64Array` and a
-  string table, plus decoded sprites.
-- `src/ui_bind.cpp`: the `UI` global (`UI.button`, `UI.combo`, `UI.swatch`…, a thin layer over
-  Dear ImGui) that `editor.js` draws its panels with, and `NATIVE` (reading and saving files, file
-  dialogs, preferences).
-- `fonts/`: Fredoka Regular and SemiBold (SIL Open Font License, `OFL.txt`).
-- `res/`: the icon (`icon.svg`, and the files `make_icons.sh` makes from it) and the Windows
-  version information.
-- `src/app.cpp`: the window. Sprites go into 1024×1024 atlas pages, so a map is a handful of draw
-  calls. Frames are only drawn when something changes, so it uses no CPU when idle. It has its own
-  copy of ImGui's SDL-renderer draw function: the stock one (1.92.9b) re-converts a draw list's whole
-  vertex buffer for every draw call (3.6 ms a frame here, instead of 0.3), and forces smooth
-  filtering, which blurred zoomed-in sprites.
-
-## Benchmarks
-
-Same machine (16 cores, RTX 5060), Launcher.exe with the map open. The CPU tests are 240 frames
-each of hovering over tiles and of panning; CPU counts every process and thread. The first three
-columns are medians of 3 runs in an 860×1052 window, from before 1.1's side panel existed; the last
-is one run of the finished editor (the window size wasn't pinned).
-
-| World Builder 2 | 1.0 Electron | 1.0 Electron, slimmed | Native, map only | **1.1** |
-|---|---|---|---|
-| Memory (PSS) | 440 MB, 4 processes (+ ~85 MB helpers) | 267 MB, 2 processes (+ ~40 MB helpers) | 93 MB | **72 MB**, 1 process |
-| Launch to map shown | 0.95 s | 0.64 s | 0.75 s | 0.79 s |
-| Hover, CPU per frame | 9.4 ms | 9.5 ms | 1.3 ms | **2.45 ms** (the side panel is drawn every frame) |
-| Pan, CPU per frame | 10.4 ms | 8.5 ms | 1.0 ms | **2.45 ms** |
-| CPU when idle | n/a | n/a | ~0 | ~0 (6 ms in 4 s) |
-| Size | 288 MB (`node_modules`) | 288 MB | 2.3 MB + 0.7 MB JS | 3.5 MB download (7 MB program, everything linked in) |

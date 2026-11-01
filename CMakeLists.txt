@@ -91,8 +91,8 @@ if(WIN32)
   target_link_libraries(imgui PUBLIC imm32)  # ImGui's default Windows IME functions
 endif()
 
-# The JS the host runs lives in the editor folder (wbcore.js, scene.js, edit.js) and native/js
-set(WBE_EDITOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." CACHE PATH "Folder holding wbcore.js")
+# The JS the host runs is in js/ (wbcore.js, scene.js, edit.js, editor.js), its fonts in fonts/
+set(WBE_EDITOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH "Folder holding js/ and fonts/")
 
 add_library(wbe_host STATIC src/js_host.cpp)
 if(WBE_GLIBC_COMPAT AND WBE_CAN_COMPAT)
@@ -145,6 +145,5 @@ endif()
 # cmake --install <build> --prefix <dir>: the program, with the JS and fonts in "data" beside it
 # (where it looks for them first), ready to zip up. release.sh adds the readme, licences and icon.
 install(TARGETS worldbuilder-native RUNTIME DESTINATION .)
-install(FILES ../wbcore.js ../scene.js ../edit.js ../wb1monsters.js DESTINATION data)
-install(FILES js/editor.js DESTINATION data/native/js)
-install(FILES fonts/Fredoka-Regular.ttf fonts/Fredoka-SemiBold.ttf fonts/OFL.txt DESTINATION data/native/fonts)
+install(FILES js/wbcore.js js/scene.js js/edit.js js/wb1monsters.js js/editor.js DESTINATION data/js)
+install(FILES fonts/Fredoka-Regular.ttf fonts/Fredoka-SemiBold.ttf fonts/OFL.txt DESTINATION data/fonts)

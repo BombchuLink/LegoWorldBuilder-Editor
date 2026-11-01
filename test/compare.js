@@ -1,4 +1,4 @@
-// Runs native/js/driver.js in Node (V8) and in the native QuickJS
+// Runs js/driver.js in Node (V8) and in the native QuickJS
 // build on the same game files, and checks the files they write are the same.
 //   node test/compare.js <out dir> <Launcher.exe>...
 // Byte-identical output is "same"; otherwise every resource is compared after decompression
@@ -6,7 +6,7 @@
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
-const WB = require("../../wbcore.js");
+const WB = require("../js/wbcore.js");
 const driver = require("../js/driver.js");
 
 const BIN = process.env.WBE_CORE || path.join(__dirname, "../build/wbe-core");

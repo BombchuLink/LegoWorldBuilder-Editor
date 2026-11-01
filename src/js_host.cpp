@@ -145,18 +145,18 @@ JsHost::~JsHost() {
   JS_FreeRuntime(rt_);
 }
 
-// The folder with wbcore.js: $WBE_EDITOR_DIR; else "data" beside the program (a release); else beside
-// the program or up to three folders above it (a build in editor/native/build finds editor/); else
-// where the source was when it was built
+// The folder holding js/ (the editor's scripts) and fonts/: $WBE_EDITOR_DIR; else "data" beside the
+// program (a release); else beside the program or up to three folders above it (a build in
+// editor/build finds editor/); else where the source was when it was built
 std::string JsHost::editor_dir() {
   const char* env = std::getenv("WBE_EDITOR_DIR");
   if (env && *env) return env;
   std::error_code ec;
   fs::path d = program_dir();
   // a release keeps them in a "data" folder beside the program
-  if (!d.empty() && fs::exists(d / "data" / "wbcore.js", ec)) return utf8_of(d / "data");
+  if (!d.empty() && fs::exists(d / "data" / "js" / "wbcore.js", ec)) return utf8_of(d / "data");
   for (int up = 0; up < 4 && !d.empty(); up++, d = d.parent_path()) {
-    if (fs::exists(d / "wbcore.js", ec) && fs::exists(d / "native" / "js" / "editor.js", ec)) return utf8_of(d);
+    if (fs::exists(d / "js" / "wbcore.js", ec) && fs::exists(d / "js" / "editor.js", ec)) return utf8_of(d);
     if (d == d.parent_path()) break;
   }
   return WBE_EDITOR_DIR;

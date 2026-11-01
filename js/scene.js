@@ -1,5 +1,5 @@
 /* What the map looks like, as drawing commands: which sprite stands for each tile and object and
- * where it goes, in map pixels. The editor (native/js/editor.js) hands them to the C++ host, which
+ * where it goes, in map pixels. The editor (editor.js) hands them to the C++ host, which
  * draws them with SDL.
  * No DOM; needs wbcore.js (WB).
  *
@@ -16,6 +16,7 @@
  *   ["badge", text, x, y, bg, fg, outline]  rounded label centered on x, y (16 high; outline may be null)
  *   ["face", x, y, inset, fill, stroke, lineWidth, screenPx, dash]  a tile's diamond (fill/stroke may be
  *                                       null; screenPx: lineWidth is in screen pixels; dash: [on, off] or null)
+ *   ["number", text, x, y]              big outlined text centered on x, y (a whirlpool's pair number)
  *   ["alpha", a]                        opacity for what follows */
 (function (root) {
   "use strict";
@@ -178,7 +179,14 @@
         if (g) out.push(["img", gname, Math.round(gx - g.w / 2), Math.round(gy - g.h)]);
         else badge(out, base === "goal" ? "!" : "★", gx, gy - 12);
       } else if (base === "whirlpool") {
-        badge(out, "⟳ " + p[1], ox + 13, oy + 25, "#0a4f8cdd");
+        // the game's swirl with its pair number over it
+        // near the middle of the tile's top face (its center is (13.5, 25) from the tile's origin),
+        // a little left and down, which looks centered with the swirl's shading
+        const fx = ox + 11.5, fy = oy + 28;
+        // the first frame of the game's swirl animation (whirlpool.generic alone is just the hole)
+        const WP = "whirlpool.generic.whirl.1", wp = sprite(WP);
+        if (wp) out.push(["img", WP, Math.round(fx - wp.w / 2), Math.round(fy - wp.h / 2)]);
+        out.push(["number", String(p[1]), fx + 2, fy - 2]);
       } else badge(out, p[0], ox + 13, oy + 25, "#a00d");
       return out;
     }

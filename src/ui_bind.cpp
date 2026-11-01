@@ -249,21 +249,68 @@ FN(ui_combo) {
 std::unordered_map<ImGuiID, int> g_live_int;
 std::unordered_map<ImGuiID, std::string> g_live_str;
 
+// inputInt(id, value, min, max): a number field with a spin box (up and down carets) inside its right end
 FN(ui_inputInt) {
   std::string label = S(0);
   int v = I(1, 0), lo = I(2, INT_MIN), hi = I(3, INT_MAX);
   ImGuiID id = ImGui::GetID(label.c_str());
+  const ImGuiStyle& st = ImGui::GetStyle();
+  float w = ImGui::CalcItemWidth(), h = ImGui::GetFrameHeight();
+  float aw = std::round(h * 0.7f);  // the spin box's width
+  ImVec2 p = ImGui::GetCursorScreenPos(), q{p.x + w, p.y + h};
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+
+  // one frame for the whole field; the text box inside it is drawn without its own
+  dl->AddRectFilled(p, q, ImGui::GetColorU32(ImGui::IsMouseHoveringRect(p, q) ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg), st.FrameRounding);
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, 0);
+  ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, 0);
+  ImGui::PushStyleColor(ImGuiCol_FrameBgActive, 0);
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0);
+  ImGui::SetNextItemWidth(w - aw);
   auto it = g_live_int.find(id);
   int cur = it != g_live_int.end() ? it->second : v;
-  ImGui::InputInt(label.c_str(), &cur);
+  ImGui::InputInt(label.c_str(), &cur, 0, 0);
   cur = std::clamp(cur, lo, hi);
-  if (ImGui::IsItemDeactivatedAfterEdit()) { g_live_int.erase(id); return JS_NewInt32(c, cur); }
-  if (ImGui::IsItemActive()) {
-    g_live_int[id] = cur;
-    // a step button press changes the value straight away
-    if (!ImGui::GetIO().WantTextInput && cur != v) { g_live_int.erase(id); return JS_NewInt32(c, cur); }
-  } else g_live_int.erase(id);
-  return JS_NewInt32(c, v);
+  int out = v;
+  bool active = ImGui::IsItemActive();
+  if (ImGui::IsItemDeactivatedAfterEdit()) { g_live_int.erase(id); out = cur; }
+  else if (active) g_live_int[id] = cur;
+  else g_live_int.erase(id);
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor(3);
+
+  // the spin box: the top half steps up, the bottom half down; holding it repeats
+  ImGui::SameLine(0, 0);
+  ImGui::PushID(label.c_str());
+  ImGui::PushItemFlag(ImGuiItemFlags_ButtonRepeat, true);
+  ImVec2 a = ImGui::GetCursorScreenPos(), b{a.x + aw, a.y + h};
+  float mid = (a.y + b.y) / 2;
+  if (ImGui::InvisibleButton("spin", {aw, h})) {
+    int base = it != g_live_int.end() ? cur : v;
+    out = std::clamp(base + (ImGui::GetIO().MousePos.y < mid ? 1 : -1), lo, hi);
+    g_live_int.erase(id);
+  }
+  bool hov = ImGui::IsItemHovered(), held = ImGui::IsItemActive();
+  ImGui::PopItemFlag();
+  ImGui::PopID();
+  if (hov || held) {
+    bool up = ImGui::GetIO().MousePos.y < mid;
+    ImVec2 ha{a.x, up ? a.y : mid}, hb{b.x, up ? mid : b.y};
+    dl->AddRectFilled(ha, hb, ImGui::GetColorU32(held ? ImGuiCol_ButtonActive : ImGuiCol_ButtonHovered),
+                      st.FrameRounding, up ? ImDrawFlags_RoundCornersTopRight : ImDrawFlags_RoundCornersBottomRight);
+  }
+  dl->AddLine({a.x, a.y + 4}, {a.x, b.y - 4}, ImGui::GetColorU32(ImGuiCol_Border));
+  // carets
+  float cx = (a.x + b.x) / 2, cw = std::round(aw * 0.22f), ch = std::round(cw * 0.65f);
+  ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
+  float uy = (a.y + mid) / 2 + 1, dy = (mid + b.y) / 2 - 1;
+  dl->AddTriangleFilled({cx - cw, uy + ch / 2}, {cx + cw, uy + ch / 2}, {cx, uy - ch / 2}, v >= hi ? ImGui::GetColorU32(ImGuiCol_TextDisabled) : col);
+  dl->AddTriangleFilled({cx - cw, dy - ch / 2}, {cx, dy + ch / 2}, {cx + cw, dy - ch / 2}, v <= lo ? ImGui::GetColorU32(ImGuiCol_TextDisabled) : col);
+
+  // the field's border, over everything (highlighted while typing)
+  if (st.FrameBorderSize > 0)
+    dl->AddRect(p, q, ImGui::GetColorU32(active ? ImGuiCol_SliderGrabActive : ImGuiCol_Border), st.FrameRounding, 0, st.FrameBorderSize);
+  return JS_NewInt32(c, out);
 }
 FN(ui_inputText) {
   std::string label = S(0), v = S(1);
@@ -303,6 +350,9 @@ FN(ui_tab) {
 }
 FN(ui_beginChild) {
   std::string s = S(0);
+  // panels only scroll up and down: Shift+wheel would otherwise slide them sideways when a row
+  // reaches past the edge (set before Begin, so it takes effect in the same frame)
+  ImGui::SetNextWindowScroll({0, -1});
   ImGui::BeginChild(s.c_str(), {PX(1, 0), PX(2, 0)}, B(3, false) ? ImGuiChildFlags_Borders : 0);
   return UNDEF;
 }
@@ -356,8 +406,6 @@ FN(ui_resizer) {
       if (ImGui::Button(id.c_str(), {BW, BH})) hit = std::string(side) + (plus ? "+" : "-");
       ImGui::PopStyleColor();
       ImGui::PopStyleVar(2);
-      bool row = std::string(side) == "top" || std::string(side) == "bottom";
-      ImGui::SetItemTooltip("%s a %s on the %s", plus ? "Add" : "Remove", row ? "row" : "column", side);
       if (ImGui::IsItemHovered()) hover_side = side;
     }
   };
@@ -422,7 +470,8 @@ FN(ui_levelRow) {
   ImDrawList* dl = ImGui::GetWindowDrawList();
   if (sel) dl->AddRectFilled({a.x - 4, a.y}, {a.x - 1, b.y}, IM_COL32(0x2a, 0x7d, 0xe1, 255));
   float col = ImGui::CalcTextSize("00").x;
-  float y = p.y + (b.y - a.y - ImGui::GetTextLineHeight()) / 2;
+  // the row is centred in the item rect, which Selectable grows by half the item spacing above and below
+  float y = a.y + (b.y - a.y - ImGui::GetTextLineHeight()) / 2;
   ImVec2 nw = ImGui::CalcTextSize(num.c_str());
   dl->AddText({p.x + col - nw.x, y}, ImGui::GetColorU32(ImGuiCol_TextDisabled), num.c_str());
   dl->PushClipRect(a, {b.x - (dirty ? 14 : 0), b.y}, true);
@@ -570,7 +619,8 @@ void install(JSContext* c, const char* global, std::initializer_list<Entry> fns)
 
 void ui_flow_item(float w) {
   const ImGuiStyle& st = ImGui::GetStyle();
-  float edge = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x - st.WindowPadding.x;
+  // the right edge of the content area: inside the padding, and left of the scrollbar when there is one
+  float edge = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x - st.WindowPadding.x - ImGui::GetCurrentWindow()->ScrollbarSizes.x;
   if (ImGui::GetItemRectMax().x + st.ItemSpacing.x + w <= edge) ImGui::SameLine();
 }
 

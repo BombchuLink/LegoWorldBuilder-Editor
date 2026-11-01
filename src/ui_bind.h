@@ -1,4 +1,4 @@
-// The UI and NATIVE globals the native editor's JS (native/js/editor.js) draws its panels with and
+// The UI and NATIVE globals the native editor's JS (js/editor.js) draws its panels with and
 // reaches files through: a thin layer over Dear ImGui, and the few things a page would ask the
 // desktop for (files, file dialogs, preferences).
 #pragma once

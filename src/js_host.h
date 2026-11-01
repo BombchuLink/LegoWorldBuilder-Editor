@@ -27,7 +27,7 @@ class JsHost {
   JSContext* ctx() const { return ctx_; }
   JSRuntime* rt() const { return rt_; }
 
-  // Run a classic script (like a <script> tag) from the editor folder, e.g. "wbcore.js"
+  // Run a classic script (like a <script> tag) from the editor folder, e.g. "js/wbcore.js"
   void load_editor_script(const std::string& name);
   void eval_script(const std::string& src, const std::string& filename);
 
@@ -45,7 +45,7 @@ class JsHost {
   // Throws JsError if v is an exception (and frees it); otherwise returns v
   JSValue check(JSValue v);
 
-  // Folder holding wbcore.js: $WBE_EDITOR_DIR, else the one the build was made from
+  // Folder holding js/ and fonts/: $WBE_EDITOR_DIR, else the one the build was made from
   static std::string editor_dir();
 
  private:
