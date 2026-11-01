@@ -27,8 +27,14 @@ fi
 # Prefer a plain "electron", else the newest versioned one (Arch ships electron41, electron43…)
 electron=$(command -v electron 2>/dev/null ||
   compgen -c electron | grep -E '^electron[0-9]+$' | sort -V | tail -1 || true)
-# …else the copy from 'npm install' in this folder
-[ -z "$electron" ] && [ -x "$here/node_modules/.bin/electron" ] && electron="$here/node_modules/.bin/electron"
+# …else the copy from 'npm install' in this folder. Run its binary directly: node_modules/.bin/electron
+# is a Node script that starts it and then idles alongside it for the whole session (~45 MB).
+if [ -z "$electron" ]; then
+  bin="$here/node_modules/electron/dist/$(cat "$here/node_modules/electron/path.txt" 2>/dev/null)"
+  if [ -f "$bin" ] && [ -x "$bin" ]; then electron=$bin
+  elif [ -x "$here/node_modules/.bin/electron" ]; then electron="$here/node_modules/.bin/electron"
+  fi
+fi
 [ -n "$electron" ] && command -v "$electron" >/dev/null ||
   { echo "Electron isn't installed (run 'npm install' here, or e.g. 'sudo pacman -S electron')." >&2; exit 1; }
 

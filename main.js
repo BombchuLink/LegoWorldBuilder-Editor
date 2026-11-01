@@ -5,6 +5,18 @@ const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const fs = require("fs");
 const path = require("path");
 
+/* Keep the footprint small: the editor only draws a 2D canvas, which Chromium's software
+ * rasterizer handles as fast as the GPU (panning is smoother, in fact). Without GPU compositing
+ * the GPU process, and with the network service in-process the network process, aren't started,
+ * leaving two processes (this one and the page) instead of four: about 280 MB instead of 450.
+ * WBE_GPU=1 brings the GPU back if a big zoomed-out map ever feels slow. */
+if (!process.env.WBE_GPU) {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch("disable-gpu-compositing");
+  app.commandLine.appendSwitch("in-process-gpu");
+}
+app.commandLine.appendSwitch("enable-features", "NetworkServiceInProcess2");
+
 const root = path.resolve(__dirname, "..");
 const GAME_FILES = [{ name: "Game launcher", extensions: ["exe"] }];
 const MOVIE_FILES = [{ name: "Shockwave movie", extensions: ["dcr"] }];
@@ -21,7 +33,8 @@ function createWindow() {
     title: "WorldBuilder Level Editor",
     backgroundColor: "#1b1f2a",
     autoHideMenuBar: true,
-    webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, sandbox: false },
+    // the preload only needs contextBridge, ipcRenderer and webUtils, which work sandboxed
+    webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, sandbox: true, spellcheck: false },
   });
   win.setMenu(null);
   win.loadFile(path.join(__dirname, "index.html"));
