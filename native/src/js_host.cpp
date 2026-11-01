@@ -8,18 +8,64 @@
 #include <fstream>
 #include <iterator>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace wbe {
 
+namespace fs = std::filesystem;
+
+fs::path fs_path(const std::string& utf8) { return fs::path(std::u8string(utf8.begin(), utf8.end())); }
+std::string utf8_of(const fs::path& p) {
+  std::u8string s = p.u8string();
+  return std::string(s.begin(), s.end());
+}
+
 std::vector<uint8_t> read_file(const std::string& path) {
-  std::ifstream f(path, std::ios::binary);
+  std::ifstream f(fs_path(path), std::ios::binary);
   if (!f) throw std::runtime_error("Can't read " + path);
   return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
 }
 
 void write_file(const std::string& path, std::span<const uint8_t> bytes) {
-  std::ofstream f(path, std::ios::binary);
+  std::ofstream f(fs_path(path), std::ios::binary);
   f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
   if (!f) throw std::runtime_error("Can't write " + path);
+}
+
+void replace_file(const std::string& from, const std::string& to) {
+#if defined(_WIN32)
+  // MinGW's std::filesystem::rename won't replace an existing file
+  if (!MoveFileExW(fs_path(from).c_str(), fs_path(to).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    throw std::runtime_error("Couldn't replace " + to + " (Windows error " + std::to_string(GetLastError()) + ")");
+#else
+  std::error_code ec;
+  fs::rename(fs_path(from), fs_path(to), ec);
+  if (ec) throw std::runtime_error("Couldn't replace " + to + ": " + ec.message());
+#endif
+}
+
+fs::path program_dir() {
+  std::error_code ec;
+#if defined(_WIN32)
+  std::wstring buf(32768, L'\0');
+  DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+  if (n == 0 || n >= buf.size()) return {};
+  buf.resize(n);
+  return fs::path(buf).parent_path();
+#elif defined(__linux__)
+  fs::path exe = fs::read_symlink("/proc/self/exe", ec);
+  return ec ? fs::path() : exe.parent_path();
+#else
+  return {};
+#endif
 }
 
 namespace {
@@ -104,14 +150,11 @@ JsHost::~JsHost() {
 std::string JsHost::editor_dir() {
   const char* env = std::getenv("WBE_EDITOR_DIR");
   if (env && *env) return env;
-  namespace fs = std::filesystem;
   std::error_code ec;
-  fs::path exe = fs::read_symlink("/proc/self/exe", ec);
-  if (!ec) {
-    fs::path d = exe.parent_path();
-    for (int up = 0; up < 4 && !d.empty(); up++, d = d.parent_path()) {
-      if (fs::exists(d / "wbcore.js", ec) && fs::exists(d / "native/js/editor.js", ec)) return d.string();
-    }
+  fs::path d = program_dir();
+  for (int up = 0; up < 4 && !d.empty(); up++, d = d.parent_path()) {
+    if (fs::exists(d / "wbcore.js", ec) && fs::exists(d / "native" / "js" / "editor.js", ec)) return utf8_of(d);
+    if (d == d.parent_path()) break;
   }
   return WBE_EDITOR_DIR;
 }

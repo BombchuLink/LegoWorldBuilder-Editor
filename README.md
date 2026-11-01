@@ -8,7 +8,7 @@ The editor can be booted by either using the electron wrapper, or index.html in 
 
 The desktop app draws in software, so it runs as two processes (about 280 MB) instead of Chromium's usual four or more. If maps ever feel slow, `WBE_GPU=1 ./worldbuilder-editor` turns GPU drawing back on.
 
-A native version (SDL3 + Dear ImGui, about 90 MB of memory and a 2.3 MB program) is in progress in `native/`. It runs this editor's own `wbcore.js` and `scene.js`, so both open, patch and save games identically and draw the same map. See `native/README.md`.
+A native version (SDL3 + Dear ImGui, about 70 MB of memory and a small program) is in `native/`. It runs this editor's own `wbcore.js`, `scene.js` and `edit.js` (the editing rules), so both open, edit, patch and save games identically and draw the same map. See `native/README.md`.
 
 ## Patches
 

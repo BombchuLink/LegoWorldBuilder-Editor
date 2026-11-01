@@ -1,13 +1,12 @@
-// WorldBuilder Level Editor, native build (stage 2): open a Launcher.exe, pick a level, look at
-// its map (pan, zoom, hover). The game file handling and what the map looks like come from the
-// editor's own JS (wbcore.js, scene.js) running in QuickJS; this draws it with SDL3 + Dear ImGui.
+// WorldBuilder Level Editor, native build: the window, the map and the event loop. The game file
+// handling, what the map looks like, the editing rules and the panels come from the editor's own
+// JS (wbcore.js, scene.js, edit.js, native/js/editor.js) running in QuickJS; this draws it with
+// SDL3 + Dear ImGui.
 //
 //   worldbuilder-native [Launcher.exe]
-//   WBE_RENDERER=software|opengl|vulkan  pick SDL's renderer (default: SDL's choice)
+//   WBE_RENDERER=software|opengl|direct3d11|direct3d|vulkan  pick SDL's renderer
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
-#include <sys/resource.h>
-#include <time.h>
 
 #include <algorithm>
 #include <array>
@@ -25,6 +24,8 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
 #include "js_host.h"
+#include "procstats.h"
+#include "ui_bind.h"
 
 namespace {
 
@@ -36,10 +37,12 @@ struct Js {
   wbe::JsHost host;
   JSValue ne = JS_UNDEFINED;
 
-  Js() {
+  explicit Js(wbe::UiHost* ui) {
+    wbe::bind_ui(host.ctx(), ui);
     host.load_editor_script("wb1monsters.js");
     host.load_editor_script("wbcore.js");
     host.load_editor_script("scene.js");
+    host.load_editor_script("edit.js");
     host.load_editor_script("native/js/editor.js");
     ne = host.global("NE");
   }
@@ -79,6 +82,8 @@ struct Js {
 };
 
 // ---------------------------------------------------------------- colours
+
+constexpr ImVec4 rgb(unsigned v) { return {((v >> 16) & 255) / 255.0f, ((v >> 8) & 255) / 255.0f, (v & 255) / 255.0f, 1}; }
 
 // "#rgb", "#rgba", "#rrggbb", "#rrggbbaa" as CSS reads them
 ImU32 css_color(const std::string& s, float alpha = 1) {
@@ -138,13 +143,8 @@ struct Atlas {
   }
 };
 
-struct Level {
-  int world, mission;
-  std::string title, member;
-};
-
 struct Scene {
-  std::vector<double> nums;  // 10 per command, see editor.js
+  std::vector<double> nums;  // 10 per command, see editor.js (pack)
   std::vector<std::string> strs;
   std::vector<ImU32> colors;  // strs read as colours (where they are colours)
 };
@@ -155,114 +155,242 @@ struct View {
 
 double prof_hover = 0, prof_ui = 0, prof_render = 0;  // ms, for WBE_SWEEP
 double prof_t[3] = {}, prof_c[3] = {};  // clear, draw data, present: wall and thread-CPU ms
-double thread_cpu_ms() { timespec t; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+using wbe::thread_cpu_ms;
 
-struct App {
+struct App : wbe::UiHost {
   SDL_Window* window = nullptr;
   SDL_Renderer* renderer = nullptr;
   std::optional<Js> js;
   ImFont* ui_font = nullptr;
   ImFont* badge_font = nullptr;
 
-  std::string file_name, status = "Open a World Builder Launcher.exe to start.";
-  int edition = 0;
-  std::vector<Level> levels;
-  int cur = -1;
+  bool has_level = false;
   int map_w = 0, map_h = 0;
-  Scene scene;
+  Scene scene, over;
   std::unordered_map<std::string, Sprite> sprites;
   Atlas atlas;
   std::vector<SDL_Texture*> big;  // sprites too big for an atlas page
   bool smooth = false;  // sprites are filtered (zoomed out) or sharp (zoomed in)
   View view;
   float user_zoom = 0;  // zoom chosen by the user; 0 fits each map to the window
-  bool show_grid = true, show_view = true;
-  std::optional<std::pair<int, int>> hover;
-  std::string hover_text;
+  bool show_view = true;
+  std::optional<std::pair<int, int>> cell;  // tile under the mouse (may be off the map)
+  bool cell_inside = false, cell_mod = false;
   ImVec2 map_min, map_size;
   bool fit_pending = false;
+  bool view_touched = false;  // panned or zoomed since the map was fitted: a resized window doesn't refit it
+  ImVec2 fitted_size;
   std::array<int, 7> start_view{};
+  bool panning = false;
+  int map_button = -1;  // button held since a press the editor took on the map
+  std::string js_error;
+  bool redraw = false, quit_now = false;
+  std::string want_level;  // WBE_LEVEL
 
   std::mutex dialog_mutex;
-  std::optional<std::string> dialog_result;
+  std::vector<std::pair<std::string, std::optional<std::string>>> dialog_results;
   Uint32 wake_event = 0;
 
-  // -------------------------------------------------------------- game
+  // -------------------------------------------------------------- JS calls
 
-  void open(const std::string& path) {
+  // NE[fn](...) for its side effects; an exception is shown in the status bar
+  void run(const char* fn, std::initializer_list<JSValue> args = {}) {
     try {
-      auto t0 = SDL_GetTicks();
-      auto bytes = wbe::read_file(path);
-      clear_sprites();
-      levels.clear();
-      cur = -1;
-      JSValue r = js->host.await(js->call("open", {js->host.new_bytes(bytes)}));
-      {
-        JSValue e = js->prop(r, "edition");
-        double d = 0;
-        JS_ToFloat64(js->host.ctx(), &d, e);
-        js->free(e);
-        edition = static_cast<int>(d);
-      }
-      JSValue lv = js->prop(r, "levels");
-      for (int64_t i = 0, n = js->length(lv); i < n; i++) {
-        JSValue l = JS_GetPropertyInt64(js->host.ctx(), lv, i);
-        levels.push_back({static_cast<int>(js->num_at(l, 0)), static_cast<int>(js->num_at(l, 1)), js->str_at(l, 2), js->str_at(l, 3)});
-        js->free(l);
-      }
-      js->free(lv);
-      js->free(r);
-      file_name = path.substr(path.find_last_of("/\\") + 1);
-      SDL_SetWindowTitle(window, (file_name + " · WorldBuilder Level Editor").c_str());
-      // WBE_LEVEL=<member> (e.g. map1.1) opens that level, else world 1 mission 1
-      const char* want = std::getenv("WBE_LEVEL");
-      int first = 0;
-      for (size_t i = 0; i < levels.size(); i++) {
-        if (want ? levels[i].member == want : levels[i].world == 1 && levels[i].mission == 1) { first = static_cast<int>(i); break; }
-      }
-      select_level(first);
-      status = "Opened " + file_name + " (" + std::to_string(SDL_GetTicks() - t0) + " ms).";
+      js->free(js->call(fn, args));
     } catch (const std::exception& e) {
-      status = std::string("Couldn't open that file: ") + e.what();
-      SDL_Log("%s", status.c_str());
+      report(e);
+    }
+  }
+  void run_async(const char* fn, std::initializer_list<JSValue> args = {}) {
+    try {
+      js->free(js->host.await(js->call(fn, args)));
+    } catch (const std::exception& e) {
+      report(e);
+    }
+  }
+  void report(const std::exception& e) {
+    js_error = e.what();
+    SDL_Log("JS: %s", e.what());
+    size_t nl = js_error.find('\n');
+    if (nl != std::string::npos) js_error.resize(nl);
+  }
+  bool call_bool(const char* fn, std::initializer_list<JSValue> args = {}) {
+    try {
+      JSValue r = js->call(fn, args);
+      bool b = JS_ToBool(js->host.ctx(), r) > 0;
+      js->free(r);
+      return b;
+    } catch (const std::exception& e) {
+      report(e);
+      return false;
+    }
+  }
+  JSValue str(const std::string& s) { return JS_NewStringLen(js->host.ctx(), s.data(), s.size()); }
+
+  // -------------------------------------------------------------- UiHost
+
+  bool sprite(const std::string& name, wbe::UiSprite& out) override {
+    auto it = sprites.find(name);
+    if (it == sprites.end() || !it->second.tex) return false;
+    out.tex = static_cast<ImTextureID>(reinterpret_cast<intptr_t>(it->second.tex));
+    out.w = it->second.w;
+    out.h = it->second.h;
+    out.uv0 = it->second.uv0;
+    out.uv1 = it->second.uv1;
+    return true;
+  }
+
+  struct DialogReq {
+    App* app;
+    std::string kind;
+  };
+  void file_dialog(const std::string& kind, bool save, const std::string& start, const std::string& ext) override {
+    static const SDL_DialogFileFilter exe[] = {{"Game launcher", "exe"}, {"All files", "*"}};
+    static const SDL_DialogFileFilter dcr[] = {{"Shockwave movie", "dcr"}, {"All files", "*"}};
+    static const SDL_DialogFileFilter txt[] = {{"Text", "txt"}, {"All files", "*"}};
+    const SDL_DialogFileFilter* f = ext == "dcr" ? dcr : ext == "txt" ? txt : exe;
+    auto cb = [](void* user, const char* const* files, int) {
+      auto* req = static_cast<DialogReq*>(user);
+      {
+        std::lock_guard lock(req->app->dialog_mutex);
+        std::optional<std::string> path;
+        if (files && files[0]) path = files[0];
+        req->app->dialog_results.emplace_back(req->kind, path);
+      }
+      SDL_Event e{};
+      e.type = req->app->wake_event;
+      SDL_PushEvent(&e);
+      delete req;
+    };
+    // WBE_DIALOG_ANSWER=<path>: answer every dialog with that path at once (for tests)
+    if (const char* answer = std::getenv("WBE_DIALOG_ANSWER")) {
+      std::lock_guard lock(dialog_mutex);
+      dialog_results.emplace_back(kind, *answer ? std::optional<std::string>(answer) : std::nullopt);
+      return;
+    }
+    auto* req = new DialogReq{this, kind};
+    const char* where = start.empty() ? nullptr : start.c_str();
+    if (save) SDL_ShowSaveFileDialog(cb, req, window, f, 2, where);
+    else SDL_ShowOpenFileDialog(cb, req, window, f, 2, where, false);
+  }
+  std::string prefs_file() override {
+    static std::string path = [] {
+      char* p = SDL_GetPrefPath("worldbuilder", "editor");
+      std::string s = p ? std::string(p) + "prefs.json" : "worldbuilder-editor-prefs.json";
+      SDL_free(p);
+      return s;
+    }();
+    return path;
+  }
+  void quit() override { quit_now = true; }
+
+  std::string status_text() {
+    try {
+      JSValue s = js->call("statusLine");
+      std::string st = js->str_at(s, 0);
+      js->free(s);
+      return st;
+    } catch (const std::exception& e) {
+      return e.what();
     }
   }
 
-  void select_level(int i) {
-    cur = i;
-    JSValue s = js->call("size", {js->num(i)});
-    map_w = static_cast<int>(js->num_at(s, 0));
-    map_h = static_cast<int>(js->num_at(s, 1));
-    js->free(s);
-    JSValue sv = js->call("startView", {js->num(i)});
-    for (int k = 0; k < 7; k++) start_view[k] = static_cast<int>(js->num_at(sv, k));
-    js->free(sv);
-    hover.reset();
-    fit_pending = true;  // once the map area's size is known
-    rebuild_scene();
+  void request_quit() {
+    if (call_bool("unsaved")) run("askQuit");
+    else quit_now = true;
+  }
+
+  void deliver_dialogs() {
+    std::vector<std::pair<std::string, std::optional<std::string>>> got;
+    {
+      std::lock_guard lock(dialog_mutex);
+      got.swap(dialog_results);
+    }
+    for (auto& [kind, path] : got) {
+      run_async("onDialog", {str(kind), path ? str(*path) : JS_NULL});
+      redraw = true;
+    }
+  }
+
+  void open_start_file(const std::string& path) {
+    run_async("openPath", {str(path), want_level.empty() ? JS_UNDEFINED : str(want_level)});
+  }
+
+  // -------------------------------------------------------------- what the JS changed
+
+  void sync() {
+    try {
+      JSValue r = js->call("poll");
+      int flags = static_cast<int>(js->num_at(r, 0));
+      float dx = static_cast<float>(js->num_at(r, 1)), dy = static_cast<float>(js->num_at(r, 2));
+      show_view = js->num_at(r, 3) != 0;
+      has_level = js->num_at(r, 4) != 0;
+      js->free(r);
+      if (flags) {
+        redraw = true;
+        JSValue t = js->call("title");
+        SDL_SetWindowTitle(window, js->host.string_of(t).c_str());
+        js->free(t);
+      }
+      if (flags & 8) clear_sprites();
+      if (flags & 4) {
+        view.x -= (dx * CELL - dy * SKEW) * view.zoom;
+        view.y -= dy * CELL * view.zoom;
+      }
+      if (flags & 2) fit_pending = true;
+      if ((flags & 3) && has_level) {
+        JSValue s = js->call("size");
+        map_w = static_cast<int>(js->num_at(s, 0));
+        map_h = static_cast<int>(js->num_at(s, 1));
+        js->free(s);
+        JSValue sv = js->call("startView");
+        for (int k = 0; k < 7; k++) start_view[k] = static_cast<int>(js->num_at(sv, k));
+        js->free(sv);
+        rebuild_scene();
+      }
+      if (call_bool("hasPending")) {
+        load_pending_sprites();
+        redraw = true;
+        if (has_level) rebuild_scene();
+      }
+    } catch (const std::exception& e) {
+      report(e);
+    }
+  }
+
+  void read_scene(JSValue r, Scene& out) {
+    JSValue nums = js->prop(r, "nums"), strs = js->prop(r, "strs");
+    size_t off = 0, len = 0, bpe = 0;
+    JSValue buf = js->host.check(JS_GetTypedArrayBuffer(js->host.ctx(), nums, &off, &len, &bpe));
+    size_t blen = 0;
+    uint8_t* p = JS_GetArrayBuffer(js->host.ctx(), &blen, buf);
+    out.nums.assign(reinterpret_cast<double*>(p + off), reinterpret_cast<double*>(p + off + len));
+    out.strs.clear();
+    for (int64_t k = 0, n = js->length(strs); k < n; k++) out.strs.push_back(js->str_at(strs, k));
+    out.colors.clear();
+    for (auto& s : out.strs) out.colors.push_back(!s.empty() && s[0] == '#' ? css_color(s) : 0);
+    for (JSValue v : {buf, nums, strs}) js->free(v);
   }
 
   // The level's map as scene.js draws it, loading the sprites it uses until it has them all
   void rebuild_scene() {
     for (int pass = 0; pass < 4; pass++) {
-      JSValue r = js->call("scene", {js->num(cur), JS_NewBool(js->host.ctx(), show_grid)});
-      JSValue nums = js->prop(r, "nums"), strs = js->prop(r, "strs");
-      size_t off = 0, len = 0, bpe = 0;
-      JSValue buf = js->host.check(JS_GetTypedArrayBuffer(js->host.ctx(), nums, &off, &len, &bpe));
-      size_t blen = 0;
-      uint8_t* p = JS_GetArrayBuffer(js->host.ctx(), &blen, buf);
-      scene.nums.assign(reinterpret_cast<double*>(p + off), reinterpret_cast<double*>(p + off + len));
-      scene.strs.clear();
-      for (int64_t k = 0, n = js->length(strs); k < n; k++) scene.strs.push_back(js->str_at(strs, k));
-      scene.colors.clear();
-      for (auto& s : scene.strs) scene.colors.push_back(!s.empty() && s[0] == '#' ? css_color(s) : 0);
-      for (JSValue v : {buf, nums, strs, r}) js->free(v);
-
-      JSValue pending = js->call("hasPending");
-      bool more = JS_ToBool(js->host.ctx(), pending);
-      js->free(pending);
-      if (!more) return;
+      JSValue r = js->call("scene");
+      read_scene(r, scene);
+      js->free(r);
+      if (!call_bool("hasPending")) return;
       load_pending_sprites();
+    }
+  }
+
+  void rebuild_overlay() {
+    try {
+      JSValue r = js->call("overlay", {JS_NewBool(js->host.ctx(), panning || ImGui::IsKeyDown(ImGuiKey_Space))});
+      read_scene(r, over);
+      js->free(r);
+    } catch (const std::exception& e) {
+      over = {};
+      report(e);
     }
   }
 
@@ -287,6 +415,7 @@ struct App {
         } else if ((s.tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h))) {
           SDL_UpdateTexture(s.tex, nullptr, rgba, w * 4);
           SDL_SetTextureBlendMode(s.tex, SDL_BLENDMODE_BLEND);
+          SDL_SetTextureScaleMode(s.tex, smooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
           big.push_back(s.tex);
         }
       }
@@ -314,9 +443,11 @@ struct App {
   }
 
   void fit_view() {
-    JSValue v = js->call("fit", {js->num(cur), js->num(map_size.x), js->num(map_size.y), js->num(user_zoom)});
+    JSValue v = js->call("fit", {js->num(map_size.x), js->num(map_size.y), js->num(user_zoom)});
     view = {static_cast<float>(js->num_at(v, 0)), static_cast<float>(js->num_at(v, 1)), static_cast<float>(js->num_at(v, 2))};
     js->free(v);
+    view_touched = false;
+    fitted_size = map_size;
   }
 
   void zoom_at(float sx, float sy, float f) {
@@ -324,24 +455,28 @@ struct App {
     view.x = sx - (sx - view.x) * nz / view.zoom;
     view.y = sy - (sy - view.y) * nz / view.zoom;
     view.zoom = user_zoom = nz;
+    view_touched = true;
   }
 
+  // The tile under a point of the map area (sx < 0: the mouse isn't over it); tells the editor when
+  // that, or Alt/Ctrl, changes
   void update_hover(float sx, float sy) {
-    std::optional<std::pair<int, int>> h;
-    if (cur >= 0 && sx >= 0 && sy >= 0 && sx < map_size.x && sy < map_size.y) {
-      JSValue c = js->call("cellAt", {js->num(view.x), js->num(view.y), js->num(view.zoom), js->num(sx), js->num(sy)});
-      int x = static_cast<int>(js->num_at(c, 0)), y = static_cast<int>(js->num_at(c, 1));
-      js->free(c);
-      if (x >= 0 && y >= 0 && x < map_w && y < map_h) h = {{x, y}};
+    if (!has_level) return;
+    bool inside = sx >= 0 && sy >= 0 && sx < map_size.x && sy < map_size.y;
+    std::optional<std::pair<int, int>> c;
+    if (inside || map_button >= 0) {
+      JSValue v = js->call("cellAt", {js->num(view.x), js->num(view.y), js->num(view.zoom), js->num(sx), js->num(sy)});
+      c = {{static_cast<int>(js->num_at(v, 0)), static_cast<int>(js->num_at(v, 1))}};
+      js->free(v);
     }
-    if (h == hover) return;
-    hover = h;
-    hover_text.clear();
-    if (hover) {
-      JSValue t = js->call("label", {js->num(cur), js->num(hover->first), js->num(hover->second)});
-      hover_text = js->host.string_of(t);
-      js->free(t);
-    }
+    const ImGuiIO& io = ImGui::GetIO();
+    bool mod = io.KeyAlt || io.KeyCtrl;
+    if (c == cell && inside == cell_inside && mod == cell_mod) return;
+    cell = c;
+    cell_inside = inside;
+    cell_mod = mod;
+    run("mouseMove", {js->num(c ? c->first : -1), js->num(c ? c->second : -1), JS_NewBool(js->host.ctx(), inside || map_button >= 0), JS_NewBool(js->host.ctx(), mod)});
+    redraw = true;
   }
 
   // -------------------------------------------------------------- drawing
@@ -397,19 +532,21 @@ struct App {
     dl->AddText(badge_font, size, {c.x - ts.x / 2, c.y - ts.y / 2}, fg, text.c_str());
   }
 
-  void draw_map(ImDrawList* dl) {
+  void draw_scene(ImDrawList* dl, const Scene& sc) {
     set_smooth(view.zoom < 1);
     float alpha = 1;
     const ImVec2 lo = map_min, hi{map_min.x + map_size.x, map_min.y + map_size.y};
     auto visible = [&](ImVec2 a, ImVec2 b) { return b.x >= lo.x && a.x <= hi.x && b.y >= lo.y && a.y <= hi.y; };
     auto with_alpha = [&](ImU32 c) { return (c & 0x00ffffff) | (static_cast<ImU32>(std::lround(((c >> 24) & 255) * alpha)) << 24); };
-    const auto& n = scene.nums;
+    auto color = [&](double i) { return with_alpha(sc.colors[static_cast<size_t>(i)]); };
+    const auto& n = sc.nums;
     for (size_t o = 0; o + 10 <= n.size(); o += 10) {
       switch (static_cast<int>(n[o])) {
         case 0:
         case 1: {
-          const Sprite& s = sprites[scene.strs[static_cast<size_t>(n[o + 1])]];
-          if (!s.tex) break;
+          auto it = sprites.find(sc.strs[static_cast<size_t>(n[o + 1])]);
+          if (it == sprites.end() || !it->second.tex) break;
+          const Sprite& s = it->second;
           float w = n[o] == 0 ? s.w : static_cast<float>(n[o + 4]), h = n[o] == 0 ? s.h : static_cast<float>(n[o + 5]);
           ImVec2 a = to_screen(static_cast<float>(n[o + 2]), static_cast<float>(n[o + 3]));
           ImVec2 b = to_screen(static_cast<float>(n[o + 2]) + w, static_cast<float>(n[o + 3]) + h);
@@ -420,22 +557,43 @@ struct App {
           ImVec2 c = to_screen(static_cast<float>(n[o + 2]), static_cast<float>(n[o + 3]));
           if (!visible({c.x - 200, c.y - 20}, {c.x + 200, c.y + 20})) break;
           int ol = static_cast<int>(n[o + 6]);
-          draw_badge(dl, scene.strs[static_cast<size_t>(n[o + 1])], static_cast<float>(n[o + 2]), static_cast<float>(n[o + 3]),
-                     with_alpha(scene.colors[static_cast<size_t>(n[o + 4])]), with_alpha(scene.colors[static_cast<size_t>(n[o + 5])]),
-                     ol >= 0 ? with_alpha(scene.colors[ol]) : 0, ol >= 0);
+          draw_badge(dl, sc.strs[static_cast<size_t>(n[o + 1])], static_cast<float>(n[o + 2]), static_cast<float>(n[o + 3]),
+                     color(n[o + 4]), color(n[o + 5]), ol >= 0 ? color(ol) : 0, ol >= 0);
           break;
         }
-        case 3: {
+        case 3:
+        case 5: {
           ImVec2 pts[4];
-          face_points(static_cast<int>(n[o + 1]), static_cast<int>(n[o + 2]), static_cast<float>(n[o + 3]), pts);
-          if (!visible({pts[3].x, pts[0].y}, {pts[1].x, pts[2].y})) break;
-          int fill = static_cast<int>(n[o + 4]), stroke = static_cast<int>(n[o + 5]);
-          if (fill >= 0) dl->AddConvexPolyFilled(pts, 4, with_alpha(scene.colors[fill]));
+          int fill = -1, stroke;
+          float lw;
+          bool screen_px;
+          double on, off;
+          if (n[o] == 3) {
+            face_points(static_cast<int>(n[o + 1]), static_cast<int>(n[o + 2]), static_cast<float>(n[o + 3]), pts);
+            fill = static_cast<int>(n[o + 4]);
+            stroke = static_cast<int>(n[o + 5]);
+            lw = static_cast<float>(n[o + 6]);
+            screen_px = n[o + 7] != 0;
+            on = n[o + 8];
+            off = n[o + 9];
+          } else {
+            // a block of tiles: corners of the tiles x0..x1, y0..y1 (exclusive ends)
+            auto p = [&](double x, double y) { return to_screen(static_cast<float>(x * CELL - y * SKEW + 1), static_cast<float>(y * CELL)); };
+            pts[0] = p(n[o + 1], n[o + 2]); pts[1] = p(n[o + 3], n[o + 2]); pts[2] = p(n[o + 3], n[o + 4]); pts[3] = p(n[o + 1], n[o + 4]);
+            stroke = static_cast<int>(n[o + 5]);
+            lw = static_cast<float>(n[o + 6]);
+            screen_px = n[o + 7] != 0;
+            on = n[o + 8];
+            off = n[o + 9];
+          }
+          if (!visible({std::min(pts[3].x, pts[0].x), pts[0].y}, {std::max(pts[1].x, pts[2].x), pts[2].y})) break;
+          if (fill >= 0) dl->AddConvexPolyFilled(pts, 4, color(fill));
           if (stroke >= 0) {
-            float lw = n[o + 7] != 0 ? static_cast<float>(n[o + 6]) : static_cast<float>(n[o + 6]) * view.zoom;
-            ImU32 col = with_alpha(scene.colors[stroke]);
-            if (n[o + 8] > 0) dashed(dl, pts, 4, col, lw, static_cast<float>(n[o + 8]) * view.zoom, static_cast<float>(n[o + 9]) * view.zoom);
-            else dl->AddPolyline(pts, 4, col, ImDrawFlags_Closed, lw);
+            float w = screen_px ? lw : lw * view.zoom;
+            // dashes are in map pixels
+            float k = view.zoom;
+            if (on > 0) dashed(dl, pts, 4, color(stroke), w, static_cast<float>(on) * k, static_cast<float>(off) * k);
+            else dl->AddPolyline(pts, 4, color(stroke), ImDrawFlags_Closed, w);
           }
           break;
         }
@@ -444,41 +602,93 @@ struct App {
     }
   }
 
-  void draw_overlay(ImDrawList* dl) {
-    if (show_view) {
-      // the game window's first view: dashed outline, and a dot on the center tile when one is set
-      auto p = [&](int x, int y) { return to_screen(x * CELL - y * SKEW + 1, y * CELL); };
-      ImVec2 pts[4] = {p(start_view[0], start_view[1]), p(start_view[2], start_view[1]), p(start_view[2], start_view[3]), p(start_view[0], start_view[3])};
-      dashed(dl, pts, 4, css_color("#ffffffb0"), 2, 10 * view.zoom, 6 * view.zoom);
-      if (start_view[6]) {
-        ImVec2 c = to_screen(start_view[4] * CELL - start_view[5] * SKEW + 13, start_view[5] * CELL + 25);
-        dl->AddCircleFilled(c, 5 * view.zoom, IM_COL32_WHITE);
-        dl->AddCircle(c, 5 * view.zoom, css_color("#1b1b1b"), 0, 2 * view.zoom);
-      }
-    }
-    if (hover) {
-      ImVec2 pts[4];
-      face_points(hover->first, hover->second, 1, pts);
-      dl->AddPolyline(pts, 4, css_color("#ffcf1a"), ImDrawFlags_Closed, 2.0f);
+  void draw_start_view(ImDrawList* dl) {
+    // the game window's first view: dashed outline, and a dot on the center tile when one is set
+    auto p = [&](int x, int y) { return to_screen(x * CELL - y * SKEW + 1, y * CELL); };
+    ImVec2 pts[4] = {p(start_view[0], start_view[1]), p(start_view[2], start_view[1]), p(start_view[2], start_view[3]), p(start_view[0], start_view[3])};
+    dashed(dl, pts, 4, css_color("#ffffffb0"), 2, 10 * view.zoom, 6 * view.zoom);
+    if (start_view[6]) {
+      ImVec2 c = to_screen(start_view[4] * CELL - start_view[5] * SKEW + 13, start_view[5] * CELL + 25);
+      dl->AddCircleFilled(c, 5 * view.zoom, IM_COL32_WHITE);
+      dl->AddCircle(c, 5 * view.zoom, css_color("#1b1b1b"), 0, 2 * view.zoom);
     }
   }
 
   // -------------------------------------------------------------- UI
 
-  void open_dialog() {
-    static const SDL_DialogFileFilter filters[] = {{"Game launcher", "exe"}};
-    SDL_ShowOpenFileDialog(
-        [](void* user, const char* const* files, int) {
-          auto* app = static_cast<App*>(user);
-          if (files && files[0]) {
-            std::lock_guard lock(app->dialog_mutex);
-            app->dialog_result = files[0];
-          }
-          SDL_Event e{};
-          e.type = app->wake_event;
-          SDL_PushEvent(&e);
-        },
-        this, window, filters, 1, nullptr, false);
+  void map_input() {
+    ImGuiIO& io = ImGui::GetIO();
+    ImVec2 m{io.MousePos.x - map_min.x, io.MousePos.y - map_min.y};
+    bool hovered = ImGui::IsItemHovered();
+    bool space = ImGui::IsKeyDown(ImGuiKey_Space) && !io.WantTextInput;
+    if (has_level && hovered && !panning && map_button < 0) {
+      // ImGui: 0 left, 1 right, 2 middle
+      for (int b = 0; b < 3; b++) {
+        if (!ImGui::IsMouseClicked(b)) continue;
+        update_hover(m.x, m.y);
+        bool took = cell && call_bool("mouseDown", {js->num(cell->first), js->num(cell->second), js->num(b), JS_NewBool(js->host.ctx(), io.KeyShift),
+                                                    JS_NewBool(js->host.ctx(), io.KeyCtrl), JS_NewBool(js->host.ctx(), io.KeyAlt), JS_NewBool(js->host.ctx(), space)});
+        if (took) map_button = b;
+        else if (b != 0 || space) panning = true;
+        redraw = true;
+        sync();
+        break;
+      }
+    }
+    if (panning) {
+      if (io.MouseDelta.x != 0 || io.MouseDelta.y != 0) view_touched = true;
+      view.x += io.MouseDelta.x;
+      view.y += io.MouseDelta.y;
+      if (!ImGui::IsMouseDown(0) && !ImGui::IsMouseDown(1) && !ImGui::IsMouseDown(2)) panning = false;
+    }
+    if (hovered && io.MouseWheel != 0 && has_level) zoom_at(m.x, m.y, std::exp(io.MouseWheel * 0.15f));
+    update_hover(hovered || map_button >= 0 ? m.x : -1, hovered || map_button >= 0 ? m.y : -1);
+    if (map_button >= 0 && !ImGui::IsMouseDown(map_button)) {
+      map_button = -1;
+      run("mouseUp");
+      redraw = true;
+    }
+    sync();
+    if (hovered && has_level) {
+      if (panning) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+      else if (space) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+      else {
+        std::string c;
+        try {
+          JSValue v = js->call("cursor");
+          c = js->host.string_of(v);
+          js->free(v);
+        } catch (const std::exception& e) {
+          report(e);
+        }
+        ImGui::SetMouseCursor(c == "grabbing" ? ImGuiMouseCursor_ResizeAll : c == "grab" || c == "pointer" || c == "copy" ? ImGuiMouseCursor_Hand : ImGuiMouseCursor_Arrow);
+      }
+    }
+  }
+
+  // Editor shortcuts, when no text field has the keyboard
+  void keys() {
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.WantTextInput) return;
+    static const std::pair<ImGuiKey, const char*> ks[] = {
+        {ImGuiKey_B, "b"}, {ImGuiKey_F, "f"}, {ImGuiKey_E, "e"}, {ImGuiKey_I, "i"}, {ImGuiKey_S, "s"}, {ImGuiKey_L, "l"},
+        {ImGuiKey_Z, "z"}, {ImGuiKey_Y, "y"}, {ImGuiKey_V, "v"}, {ImGuiKey_O, "o"},
+        {ImGuiKey_Escape, "escape"}, {ImGuiKey_Delete, "delete"},
+    };
+    for (auto& [k, name] : ks) {
+      if (!ImGui::IsKeyPressed(k, k == ImGuiKey_Z || k == ImGuiKey_Y)) continue;
+      if (io.KeyAlt) continue;
+      if (call_bool("key", {str(name), JS_NewBool(js->host.ctx(), io.KeyCtrl), JS_NewBool(js->host.ctx(), io.KeyShift)})) redraw = true;
+    }
+  }
+
+  // NE[fn]() that draws ImGui widgets
+  void draw_js(const char* fn) {
+    try {
+      js->free(js->call(fn));
+    } catch (const std::exception& e) {
+      report(e);
+    }
   }
 
   void ui() {
@@ -488,85 +698,134 @@ struct App {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
     ImGui::Begin("##main", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
     ImGui::PopStyleVar();
+    keys();
+
+    float left_w = 230, side_w = 0;
+    try {
+      JSValue l = js->call("layout", {js->num(ImGui::GetContentRegionAvail().x)});
+      left_w = static_cast<float>(js->num_at(l, 0));
+      side_w = static_cast<float>(js->num_at(l, 1));
+      js->free(l);
+    } catch (const std::exception& e) {
+      report(e);
+    }
+    const float grip = side_w > 0 ? 6 : 0;
 
     // level list
-    ImGui::BeginChild("levels", {230, 0}, ImGuiChildFlags_Borders);
-    if (ImGui::Button("Open Launcher.exe...", {-1, 0})) open_dialog();
-    ImGui::Separator();
-    int world = -1;
-    for (size_t i = 0; i < levels.size(); i++) {
-      const Level& l = levels[i];
-      if (l.world != world) {
-        world = l.world;
-        ImGui::SeparatorText(world == 999 ? "Tutorial button map" : ("World " + std::to_string(world)).c_str());
-      }
-      std::string label = (l.world == 999 ? std::string("-") : std::to_string(l.mission)) + "  " + l.title + "##" + l.member;
-      if (ImGui::Selectable(label.c_str(), static_cast<int>(i) == cur)) select_level(static_cast<int>(i));
-      if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", l.member.c_str());
-    }
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {6, 6});
+    ImGui::BeginChild("levels", {left_w, 0}, ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+    draw_js("drawLevels");
     ImGui::EndChild();
+    ImGui::PopStyleVar();
     ImGui::SameLine(0, 0);
 
     // toolbar, map, status bar
-    ImGui::BeginGroup();
+    float mid_w = std::max(100.0f, ImGui::GetContentRegionAvail().x - side_w - grip);
+    ImGui::BeginChild("middle", {mid_w, 0}, 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::Dummy({0, 2});
     ImGui::Indent(8);
-    bool redo = false;
-    redo |= ImGui::Checkbox("Grid", &show_grid);
-    ImGui::SameLine();
-    ImGui::Checkbox("Start view", &show_view);
-    ImGui::SameLine();
-    ImGui::TextDisabled("|");
-    ImGui::SameLine();
-    if (ImGui::Button("-")) zoom_at(map_size.x / 2, map_size.y / 2, 0.8f);
-    ImGui::SameLine();
-    if (ImGui::Button((std::to_string(static_cast<int>(std::lround(view.zoom * 100))) + "%").c_str())) {
-      zoom_at(map_size.x / 2, map_size.y / 2, 1 / view.zoom);
-      view.x = std::round(view.x);
-      view.y = std::round(view.y);
+    draw_js("drawToolbar");
+    if (has_level) {
+      auto bw = [](const char* l) { return ImGui::CalcTextSize(l).x + ImGui::GetStyle().FramePadding.x * 2; };
+      wbe::ui_flow_item(bw("-") + bw("100%") + bw("+") + bw("Fit") + 3 * ImGui::GetStyle().ItemSpacing.x);
+      if (ImGui::Button("-")) zoom_at(map_size.x / 2, map_size.y / 2, 0.8f);
+      ImGui::SetItemTooltip("Zoom out");
+      ImGui::SameLine();
+      if (ImGui::Button((std::to_string(static_cast<int>(std::lround(view.zoom * 100))) + "%").c_str())) {
+        zoom_at(map_size.x / 2, map_size.y / 2, 1 / view.zoom);
+        view.x = std::round(view.x);
+        view.y = std::round(view.y);
+      }
+      ImGui::SetItemTooltip("100%%: the game's own size");
+      ImGui::SameLine();
+      if (ImGui::Button("+")) zoom_at(map_size.x / 2, map_size.y / 2, 1.25f);
+      ImGui::SetItemTooltip("Zoom in");
+      ImGui::SameLine();
+      if (ImGui::Button("Fit")) { user_zoom = 0; fit_view(); }
+      ImGui::SetItemTooltip("Fit the map to the window");
+    } else {
+      ImGui::NewLine();
     }
-    ImGui::SameLine();
-    if (ImGui::Button("+")) zoom_at(map_size.x / 2, map_size.y / 2, 1.25f);
-    ImGui::SameLine();
-    if (ImGui::Button("Fit")) { user_zoom = 0; fit_view(); }
     ImGui::Unindent(8);
-    if (redo && cur >= 0) rebuild_scene();
 
     float status_h = ImGui::GetFrameHeightWithSpacing();
     ImVec2 avail = ImGui::GetContentRegionAvail();
     map_min = ImGui::GetCursorScreenPos();
     map_size = {avail.x, std::max(50.0f, avail.y - status_h)};
     ImGui::InvisibleButton("map", map_size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
-    if (fit_pending && cur >= 0) { fit_view(); fit_pending = false; }
-    ImGuiIO& io = ImGui::GetIO();
-    ImVec2 m{io.MousePos.x - map_min.x, io.MousePos.y - map_min.y};
-    if (ImGui::IsItemActive() && (ImGui::IsMouseDown(ImGuiMouseButton_Right) || ImGui::IsMouseDown(ImGuiMouseButton_Middle) ||
-                                  (ImGui::IsMouseDown(ImGuiMouseButton_Left) && ImGui::IsKeyDown(ImGuiKey_Space)))) {
-      view.x += io.MouseDelta.x;
-      view.y += io.MouseDelta.y;
-    }
-    if (ImGui::IsItemHovered() && io.MouseWheel != 0 && cur >= 0) zoom_at(m.x, m.y, std::exp(io.MouseWheel * 0.15f));
-    if (cur >= 0) update_hover(ImGui::IsItemHovered() ? m.x : -1, ImGui::IsItemHovered() ? m.y : -1);
+    if (has_level && !view_touched && (map_size.x != fitted_size.x || map_size.y != fitted_size.y)) fit_pending = true;
+    if (fit_pending && has_level) { fit_view(); fit_pending = false; }
+    map_input();
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRect(map_min, {map_min.x + map_size.x, map_min.y + map_size.y}, true);
     dl->AddRectFilledMultiColor(map_min, {map_min.x + map_size.x, map_min.y + map_size.y}, css_color("#1b3352"), css_color("#1b3352"), css_color("#0b1522"), css_color("#0b1522"));
-    if (cur >= 0) {
-      draw_map(dl);
-      draw_overlay(dl);
+    if (has_level) {
+      draw_scene(dl, scene);
+      if (show_view) draw_start_view(dl);
+      rebuild_overlay();
+      draw_scene(dl, over);
     }
     dl->PopClipRect();
+    if (!has_level) {
+      // welcome
+      const char* t = "WorldBuilder Level Editor";
+      ImVec2 ts = ImGui::CalcTextSize(t);
+      ImGui::SetCursorScreenPos({map_min.x + (map_size.x - ts.x) / 2, map_min.y + map_size.y / 2 - 50});
+      ImGui::TextUnformatted(t);
+      ImGui::SetCursorScreenPos({map_min.x + map_size.x / 2 - 110, map_min.y + map_size.y / 2 - 20});
+      if (ImGui::Button("Open Launcher.exe...", {220, 40})) file_dialog("open", false, "", "exe");
+      ImGui::SetCursorScreenPos({map_min.x, map_min.y + map_size.y});
+    }
 
     ImGui::Indent(8);
     ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(status.c_str());
-    if (!hover_text.empty()) {
-      ImGui::SameLine(0, 24);
-      ImGui::TextDisabled("%s", hover_text.c_str());
+    if (!js_error.empty()) {
+      ImGui::TextColored({1, 0.36f, 0.36f, 1}, "Error: %s", js_error.c_str());
+      ImGui::SameLine();
+      if (ImGui::SmallButton("x")) js_error.clear();
+    } else {
+      try {
+        JSValue s = js->call("statusLine");
+        std::string st = js->str_at(s, 0), hv = js->str_at(s, 1);
+        js->free(s);
+        ImGui::TextUnformatted(st.c_str());
+        if (!hv.empty()) {
+          ImGui::SameLine(0, 24);
+          ImGui::TextDisabled("%s", hv.c_str());
+        }
+      } catch (const std::exception& e) {
+        report(e);
+      }
     }
     ImGui::Unindent(8);
-    ImGui::EndGroup();
+    ImGui::EndChild();
+
+    // side panel, with a grip on its left edge to resize it
+    if (side_w > 0) {
+      ImGui::SameLine(0, 0);
+      ImGui::InvisibleButton("grip", {grip, ImGui::GetContentRegionAvail().y});
+      if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+      if (ImGui::IsItemActive() && ImGui::GetIO().MouseDelta.x != 0) run("setSideWidth", {js->num(side_w - ImGui::GetIO().MouseDelta.x)});
+      if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) run("setSideWidth", {js->num(360)});
+      ImGui::SameLine(0, 0);
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {8, 6});
+      ImGui::BeginChild("side", {0, 0}, ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+      draw_js("drawSide");
+      ImGui::EndChild();
+      ImGui::PopStyleVar();
+    }
+    draw_js("drawModals");
     ImGui::End();
+  }
+
+  // After a frame: what the panels started (files, saving), and what they changed
+  void after_frame() {
+    if (call_bool("hasJobs")) {
+      run_async("runJobs");
+      redraw = true;
+    }
+    sync();
   }
 };
 
@@ -574,17 +833,8 @@ struct App {
 // The same synthetic test the Electron harness runs: 240 frames hovering over tiles, then 240
 // frames panning, at the same positions; prints CPU (all threads) and memory.
 
-double cpu_ms() {
-  rusage ru{};
-  getrusage(RUSAGE_SELF, &ru);
-  return (ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1e3 + (ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1e3;
-}
-long pss_kb() {
-  std::ifstream f("/proc/self/smaps_rollup");
-  std::string line;
-  while (std::getline(f, line)) if (line.rfind("Pss:", 0) == 0) return std::atol(line.c_str() + 4);
-  return 0;
-}
+double cpu_ms() { return wbe::process_cpu_ms(); }
+long pss_kb() { return wbe::memory_kb(); }
 
 struct Sweep {
   int phase = 0, frame = 0;  // 0 settle, 1 idle, 2 hover, 3 pan, 4 done
@@ -680,11 +930,99 @@ void render_draw_data(ImDrawData* dd, SDL_Renderer* renderer) {
   SDL_SetRenderClipRect(renderer, nullptr);
 }
 
-ImFont* load_font(const char* const* candidates, float size) {
-  for (const char* const* p = candidates; *p; p++) {
-    if (SDL_GetPathInfo(*p, nullptr)) return ImGui::GetIO().Fonts->AddFontFromFileTTF(*p, size);
+// The first of these font files that exists; merge: add its glyphs to the last font loaded
+ImFont* load_font(const std::vector<std::string>& candidates, float size, bool merge = false) {
+  ImFontConfig cfg;
+  cfg.MergeMode = merge;
+  for (const std::string& p : candidates) {
+    if (SDL_GetPathInfo(p.c_str(), nullptr)) return ImGui::GetIO().Fonts->AddFontFromFileTTF(p.c_str(), size, &cfg);
   }
   return nullptr;
+}
+
+/* The web editor's look (style.css): its dark slate panels, blue for what's selected, yellow for
+ * accents, rounded 6px controls and the Fredoka font. */
+namespace theme {
+const ImVec4 bg = rgb(0x15171c), panel = rgb(0x1d2027), panel2 = rgb(0x252933), line = rgb(0x333845), text = rgb(0xe7e9ee),
+             muted = rgb(0x9097a6), yellow = rgb(0xffcf1a), blue = rgb(0x2a7de1), hover = rgb(0x2c313d), sel = rgb(0x2b3446);
+}
+
+void apply_style() {
+  using namespace theme;
+  ImGuiStyle& st = ImGui::GetStyle();
+  st.WindowPadding = {10, 10};
+  st.FramePadding = {9, 4};
+  st.ItemSpacing = {6, 6};
+  st.ItemInnerSpacing = {6, 4};
+  st.IndentSpacing = 16;
+  st.ScrollbarSize = 10;
+  st.GrabMinSize = 12;
+  st.WindowRounding = 10;
+  st.ChildRounding = 0;
+  st.FrameRounding = 6;
+  st.PopupRounding = 6;
+  st.ScrollbarRounding = 6;
+  st.GrabRounding = 6;
+  st.TabRounding = 0;
+  st.WindowBorderSize = 1;
+  st.ChildBorderSize = 1;
+  st.PopupBorderSize = 1;
+  st.FrameBorderSize = 1;
+  st.TabBorderSize = 0;
+  st.TabBarBorderSize = 1;
+  st.TabBarOverlineSize = 0;
+  st.SeparatorTextBorderSize = 1;
+  st.SeparatorTextPadding = {0, 4};
+  st.SeparatorTextAlign = {0, 0.5f};
+  st.WindowTitleAlign = {0, 0.5f};
+  st.SelectableTextAlign = {0, 0.5f};
+
+  ImVec4* c = st.Colors;
+  c[ImGuiCol_Text] = text;
+  c[ImGuiCol_TextDisabled] = muted;
+  c[ImGuiCol_WindowBg] = bg;
+  c[ImGuiCol_ChildBg] = panel;
+  c[ImGuiCol_PopupBg] = panel;
+  c[ImGuiCol_Border] = line;
+  c[ImGuiCol_BorderShadow] = {0, 0, 0, 0};
+  c[ImGuiCol_FrameBg] = bg;
+  c[ImGuiCol_FrameBgHovered] = rgb(0x1a1d23);
+  c[ImGuiCol_FrameBgActive] = rgb(0x1a1d23);
+  c[ImGuiCol_TitleBg] = panel2;
+  c[ImGuiCol_TitleBgActive] = panel2;
+  c[ImGuiCol_TitleBgCollapsed] = panel2;
+  c[ImGuiCol_MenuBarBg] = panel;
+  c[ImGuiCol_ScrollbarBg] = {0, 0, 0, 0};
+  c[ImGuiCol_ScrollbarGrab] = line;
+  c[ImGuiCol_ScrollbarGrabHovered] = rgb(0x4a5163);
+  c[ImGuiCol_ScrollbarGrabActive] = muted;
+  c[ImGuiCol_CheckMark] = rgb(0xffffff);
+  c[ImGuiCol_SliderGrab] = blue;
+  c[ImGuiCol_SliderGrabActive] = rgb(0x3a8bf0);
+  c[ImGuiCol_Button] = panel2;
+  c[ImGuiCol_ButtonHovered] = hover;
+  c[ImGuiCol_ButtonActive] = rgb(0x343a48);
+  c[ImGuiCol_Header] = sel;
+  c[ImGuiCol_HeaderHovered] = rgb(0x262b36);
+  c[ImGuiCol_HeaderActive] = sel;
+  c[ImGuiCol_Separator] = line;
+  c[ImGuiCol_SeparatorHovered] = blue;
+  c[ImGuiCol_SeparatorActive] = blue;
+  c[ImGuiCol_ResizeGrip] = {0, 0, 0, 0};
+  c[ImGuiCol_ResizeGripHovered] = blue;
+  c[ImGuiCol_ResizeGripActive] = blue;
+  c[ImGuiCol_InputTextCursor] = text;
+  c[ImGuiCol_Tab] = panel;
+  c[ImGuiCol_TabHovered] = panel2;
+  c[ImGuiCol_TabSelected] = panel;
+  c[ImGuiCol_TabSelectedOverline] = yellow;
+  c[ImGuiCol_TabDimmed] = panel;
+  c[ImGuiCol_TabDimmedSelected] = panel;
+  c[ImGuiCol_TabDimmedSelectedOverline] = yellow;
+  c[ImGuiCol_TextSelectedBg] = ImVec4(blue.x, blue.y, blue.z, 0.45f);
+  c[ImGuiCol_DragDropTarget] = yellow;
+  c[ImGuiCol_NavCursor] = blue;
+  c[ImGuiCol_ModalWindowDimBg] = {0, 0, 0, 0.62f};
 }
 
 }  // namespace
@@ -698,7 +1036,16 @@ int main(int argc, char** argv) {
   app.wake_event = SDL_RegisterEvents(1);
   app.window = SDL_CreateWindow("WorldBuilder Level Editor", 1400, 900, SDL_WINDOW_RESIZABLE);
   const char* want = std::getenv("WBE_RENDERER");
-  app.renderer = SDL_CreateRenderer(app.window, want && *want ? want : nullptr);
+  // WBE_RENDERER, else SDL's choice; if that fails (an old graphics driver, a virtual machine,
+  // remote desktop), the next one down until one works
+  if (app.window) {
+    if (want && *want) app.renderer = SDL_CreateRenderer(app.window, want);
+    if (!app.renderer) app.renderer = SDL_CreateRenderer(app.window, nullptr);
+    for (const char* r : {"direct3d11", "direct3d", "opengl", "software"}) {
+      if (app.renderer) break;
+      app.renderer = SDL_CreateRenderer(app.window, r);
+    }
+  }
   if (!app.window || !app.renderer) {
     std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
     return 1;
@@ -710,25 +1057,41 @@ int main(int argc, char** argv) {
   ImGuiIO& io = ImGui::GetIO();
   io.IniFilename = nullptr;
   ImGui::StyleColorsDark();
-  static const char* const ui_fonts[] = {"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
-                                         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", nullptr};
-  static const char* const bold_fonts[] = {"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
-                                           "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", nullptr};
-  app.ui_font = load_font(ui_fonts, 15);
+  apply_style();
+  // Fredoka as the web editor uses (native/fonts), and a system font for the symbols it lacks
+  // (✓ ⚠ ● …): DejaVu on Linux, Segoe UI Symbol on Windows (7 and later), else Arial
+  const std::string fonts = wbe::JsHost::editor_dir() + "/native/fonts/";
+  const char* windir = std::getenv("WINDIR");
+  const std::string win = std::string(windir ? windir : "C:\\Windows") + "\\Fonts\\";
+  const std::vector<std::string> ui_main = {fonts + "Fredoka-Regular.ttf"}, bold_main = {fonts + "Fredoka-SemiBold.ttf"};
+  const std::vector<std::string> ui_fonts = {"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                                             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", win + "seguisym.ttf",
+                                             win + "segoeui.ttf", win + "arial.ttf"};
+  const std::vector<std::string> bold_fonts = {"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+                                               "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", win + "segoeuib.ttf",
+                                               win + "arialbd.ttf"};
+  app.ui_font = load_font(ui_main, 16);
+  if (app.ui_font) load_font(ui_fonts, 15, true);
+  else app.ui_font = load_font(ui_fonts, 15);
   if (!app.ui_font) app.ui_font = io.Fonts->AddFontDefault();
-  app.badge_font = load_font(bold_fonts, 11);
+  // map labels, as the web editor's badges (Fredoka 600, 11px)
+  app.badge_font = load_font(bold_main, 11);
+  if (!app.badge_font) app.badge_font = load_font(bold_fonts, 11);
   if (!app.badge_font) app.badge_font = app.ui_font;
   ImGui_ImplSDL3_InitForSDLRenderer(app.window, app.renderer);
   ImGui_ImplSDLRenderer3_Init(app.renderer);
 
   try {
-    app.js.emplace();
+    app.js.emplace(&app);
   } catch (const std::exception& e) {
     std::fprintf(stderr, "Couldn't load the editor's scripts: %s\n", e.what());
     return 1;
   }
   if (const char* z = std::getenv("WBE_ZOOM")) app.user_zoom = static_cast<float>(std::atof(z));  // e.g. 1 for 100%
-  if (argc > 1) app.open(argv[1]);
+  io.ConfigErrorRecoveryEnableAssert = false;  // a script error mid-panel is reported, not fatal
+  if (const char* l = std::getenv("WBE_LEVEL")) app.want_level = l;
+  if (argc > 1) app.open_start_file(argv[1]);
+  app.sync();
 
   // Draw only when something happened (a few frames after, so ImGui settles)
   int frames = 3;
@@ -741,18 +1104,18 @@ int main(int argc, char** argv) {
     bool got = frames > 0 || sweep ? SDL_PollEvent(&e) : SDL_WaitEventTimeout(&e, quit_at ? 100 : -1);
     while (got) {
       ImGui_ImplSDL3_ProcessEvent(&e);
-      if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && e.window.windowID == SDL_GetWindowID(app.window))) running = false;
+      if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && e.window.windowID == SDL_GetWindowID(app.window))) {
+        if (quit_at) app.quit_now = true; else app.request_quit();
+      }
+      if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) {
+        std::lock_guard lock(app.dialog_mutex);
+        app.dialog_results.emplace_back("drop", std::string(e.drop.data));
+      }
       frames = 3;
       got = SDL_PollEvent(&e);
     }
-    {
-      std::optional<std::string> path;
-      {
-        std::lock_guard lock(app.dialog_mutex);
-        path.swap(app.dialog_result);
-      }
-      if (path) app.open(*path);
-    }
+    app.deliver_dialogs();
+    if (app.quit_now) running = false;
     const char* shot = std::getenv("WBE_SHOT");  // with WBE_BENCH: save the last frame there (.bmp)
     bool last = quit_at && SDL_GetTicks() >= quit_at;
     if (last) { running = false; frames = 1; }
@@ -762,7 +1125,7 @@ int main(int argc, char** argv) {
         std::printf("RENDERER %s\n", SDL_GetRendererName(app.renderer));
         std::printf("SPLIT wall/cpu ms: clear %.0f/%.0f, drawdata %.0f/%.0f, present %.0f/%.0f\n", prof_t[0], prof_c[0], prof_t[1], prof_c[1], prof_t[2], prof_c[2]);
         std::printf("PROF hover-js %.0f ms, ui+drawlists %.0f ms, render-submit %.0f ms\n", prof_hover, prof_ui, prof_render);
-        std::printf("SWEEP {%s\"pssMB\": %.1f, \"status\": \"%s\"}\n", sweep->out.c_str(), pss_kb() / 1024.0, app.status.c_str());
+        std::printf("SWEEP {%s\"pssMB\": %.1f, \"status\": \"%s\"}\n", sweep->out.c_str(), pss_kb() / 1024.0, app.status_text().c_str());
         running = false;
       }
     }
@@ -774,6 +1137,8 @@ int main(int argc, char** argv) {
     Uint64 u0 = SDL_GetTicksNS();
     app.ui();
     ImGui::Render();
+    app.after_frame();
+    if (app.redraw) { frames = std::max(frames, 2); app.redraw = false; }
     Uint64 u1 = SDL_GetTicksNS();
     bool prof = sweep && sweep->phase >= 2;
     auto lap = [&, w = SDL_GetTicksNS(), c = thread_cpu_ms()](int k) mutable {
@@ -793,7 +1158,7 @@ int main(int argc, char** argv) {
     SDL_RenderPresent(app.renderer);
     lap(2);
   }
-  if (quit_at) std::printf("status: %s\n", app.status.c_str());
+  if (quit_at) std::printf("status: %s\n", app.status_text().c_str());
 
   app.clear_sprites();
   app.js.reset();

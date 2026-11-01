@@ -2,6 +2,7 @@
 // few browser APIs it uses, a way to load the editor's scripts and to wait for its promises.
 #pragma once
 #include <cstdint>
+#include <filesystem>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -53,7 +54,16 @@ class JsHost {
   JSContext* ctx_;
 };
 
+// Paths are UTF-8 strings everywhere (as SDL and the JS hand them over); on Windows they're turned
+// into wide paths, so folders with accented or other non-ASCII names work
+std::filesystem::path fs_path(const std::string& utf8);
+std::string utf8_of(const std::filesystem::path& p);
+
 std::vector<uint8_t> read_file(const std::string& path);
 void write_file(const std::string& path, std::span<const uint8_t> bytes);
+// Put `from` in place of `to`, replacing it if it exists (in one step where the system allows)
+void replace_file(const std::string& from, const std::string& to);
+// The folder holding this program
+std::filesystem::path program_dir();
 
 }  // namespace wbe

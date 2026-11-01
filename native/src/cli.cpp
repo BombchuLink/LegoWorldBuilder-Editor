@@ -5,7 +5,7 @@
 #include <cstdio>
 #include <exception>
 
-#include <sys/resource.h>
+#include "procstats.h"
 
 #include "js_host.h"
 
@@ -41,11 +41,9 @@ int main(int argc, char** argv) {
     JS_ComputeMemoryUsage(js.rt(), &mu);
     auto ms = [](auto a, auto b) { return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count(); };
     std::printf("%s\n", js.string_of(json).c_str());
-    rusage ru{};
-    getrusage(RUSAGE_SELF, &ru);
     std::printf("{\"native\":{\"loadScriptsMs\":%lld,\"runMs\":%lld,\"outBytes\":%zu,\"jsHeapMB\":%.1f,\"peakRssMB\":%.1f}}\n",
                 static_cast<long long>(ms(t0, t1)), static_cast<long long>(ms(t1, t2)), out.size(),
-                mu.memory_used_size / 1048576.0, ru.ru_maxrss / 1024.0);
+                mu.memory_used_size / 1048576.0, wbe::peak_memory_mb());
     for (JSValue v : {json, report, bytes, result, run, driver}) JS_FreeValue(ctx, v);
     return 0;
   } catch (const std::exception& e) {

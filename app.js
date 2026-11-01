@@ -41,6 +41,9 @@
     clip: null, pasting: false, // tiles copied with the Select tool, and whether clicks place them
   };
 
+  // the editing rules (edit.js), shared with the native editor
+  const E = WBEdit.create(S, { status: (t) => setStatus(t) });
+
   const canvas = $("#map");
   let panning = null; // active pan drag
   let spaceDown = false; // Space held: left-drag pans
@@ -113,43 +116,16 @@
     });
     S.textEdits = new Map();
     S.imported = null;
-    S.tutorialHook = await movie.findTutorialHook();
-    S.keyHandlers = await movie.findKeyHandlers();
-    S.planSwoops = await movie.findPlanSwoop();
-    // units and plans can only start on deep water when the level loader can be (or is) fixed
-    S.deepWater = await movie.findDeepWater();
-    // levels can pick their music once mission start is fixed to read it
-    S.levelMusic = await movie.findLevelMusic();
-    // reaching a goal saves progress mid-game and freezes it; the fix saves when the mission ends
-    S.goalSave = await movie.findGoalSave();
-    // a unit taken apart on a whirlpool after teleporting leaves the pair blocked for good
-    S.whirlpoolFix = await movie.findWhirlpoolFix();
-    // a monster built from a plan comes out selected, so it can be driven like a vehicle
-    S.builtMonsterSelect = await movie.findBuiltMonsterSelect();
-    S.unlockAll = await movie.findUnlockAll();
-    // goals draw a shadow named after their terrain; deep water has none until the patch adds it
-    S.goalShadow = await movie.findGoalShadow();
-    S.goalShadowsBase = new Set(game.goalShadows);
-    // monsters get plans once the game has their plans-bar icons; the editor shows them from the start
-    S.monsterPlans = await movie.findMonsterPlans();
-    S.monsterHealth = await movie.findMonsterHealth();
-    // WB2's T Rex and scorpion can be placed once the patch gives them their WB1 artwork
-    S.monsterArt = await movie.findMonsterArt();
-    S.monsterArtMembers = new Set(S.monsterArt.flatMap((h) => h.targets.map((t) => t.member)));
-    S.placeableMonstersBase = new Set(game.placeable.monster);
-    S.planIconsBase = new Set(game.planIcons);
-    S.monsterPlanIcons = new Map();
-    for (const h of S.monsterPlans) for (const t of h.targets) {
-      S.monsterPlanIcons.set(t.member, t.name);
-      if (!movie.byName.has(t.member)) {
-        const p = createImageBitmap(new ImageData(new Uint8ClampedArray(t.icon.rgba), t.icon.w, t.icon.h))
-          .then((img) => ({ img, w: t.icon.w, h: t.icon.h, regX: t.icon.regX, regY: t.icon.regY }));
-        S.sprites.set(t.member, p);
-        p.then((r) => S.sprites.set(t.member, r));
-      }
+    await E.loadFinds();
+    // monster plan icons the patch adds on save are shown from the editor's copy
+    for (const [member, t] of S.monsterPlanIcons) {
+      if (movie.byName.has(member)) continue;
+      const p = createImageBitmap(new ImageData(new Uint8ClampedArray(t.icon.rgba), t.icon.w, t.icon.h))
+        .then((img) => ({ img, w: t.icon.w, h: t.icon.h, regX: t.icon.regX, regY: t.icon.regY }));
+      S.sprites.set(member, p);
+      p.then((r) => S.sprites.set(member, r));
     }
     initPatches();
-    syncGoalShadows();
     $("#gameLabel").textContent = `World Builder${game.edition === 2 ? " 2" : ""} · ${file.name} · ${game.levels.length} levels`;
     $("#welcome").hidden = true;
     $("#toolbar").hidden = false;
@@ -244,18 +220,8 @@
   const recipeOf = (name) => S.scene.recipeOf(name);
   const recipeText = (recipe) => S.scene.recipeText(recipe);
   const cellLabel = (x, y) => S.scene.cellLabel(lvl(), x, y);
-  // Models a plan can be for: vehicles, buildings and (with their icons) monsters, never the boulder
-  function planModels() {
-    return [...placeable("vehicle"), ...placeable("building"), ...placeable("monster").filter((n) => n !== "boulder")].filter(planSpriteName);
-  }
-
-
-  function placeable(cls) { return (S.game.units[cls] || []).filter((n) => S.game.placeable[cls].has(n)); }
-
-  function unitClassOf(name) {
-    for (const cls of ["vehicle", "building", "monster"]) if ((S.game.units[cls] || []).includes(name)) return cls;
-    return "vehicle";
-  }
+  const planModels = () => E.planModels();
+  const placeable = (cls) => E.placeable(cls);
 
   // ------------------------------------------------------------------ level state
 
@@ -319,113 +285,18 @@
     fitView();
   }
 
-  // item helpers
-  function partsKey(p) { return p.join(","); }
-  function itemIndexFor(parts) {
-    const lv = lvl();
-    const k = partsKey(parts);
-    let i = lv.items.findIndex((it) => partsKey(it.parts) === k);
-    if (i < 0) { lv.items.push({ key: "", parts: parts.slice() }); i = lv.items.length - 1; }
-    return i;
-  }
-  function withWater(parts, water) {
-    const p = parts.slice();
-    const base = p[0].replace(/^water/, "");
-    if (base === "unit" || base === "plan") p.length = 3; // drops a deep-water terrain
-    if (["unit", "plan", "pile"].includes(base)) p[0] = (water ? "water" : "") + base;
-    else if (base === "goal" || base === "bonusgoal") {
-      p.length = Math.min(p.length, 2);
-      if (water) p.push("water");
-    }
-    return p;
-  }
-  function isWaterChar(c) { return WB.isWaterTerrain(S.game.terrain[c]); }
-  function terrainChar(name) { return Object.keys(S.game.terrain).find((k) => S.game.terrain[k] === name); }
-  // the terrain character under an object
-  function groundChar(parts) { return terrainChar(WB.itemTerrain(parts)) ?? (WB.itemIsWater(parts) ? "w" : "."); }
-
-  /* The version of an object that can stand on terrain ch, or null if the game doesn't allow it:
-   * goals store any terrain but holes, units, plans and piles have a land and a water version
-   * (units only where they can go; swimmers that can use deep water, and plans, can also have
-   * deep water as a fourth field, which the readmap fix makes the game read), whirlpools need
-   * plain water. */
-  const canStartDeep = (kind) => S.patchOn.deep && S.deepWater.some((h) => kind in h.kinds);
-  function partsOn(p, ch) {
-    const t = S.game.terrain[ch];
-    const base = p[0].replace(/^water/, "");
-    if (base === "goal" || base === "bonusgoal") return t === "hole" ? null : t === "normal" || !t ? p.slice(0, 2) : [...p.slice(0, 2), t];
-    if (base === "whirlpool") return t === "water" ? p : null;
-    if (base === "unit") {
-      if (t === "normal") return WB.unitCanUse(S.game, p[1], p[2], false) ? ["unit", p[1], p[2]] : null;
-      if (t === "water") return WB.unitCanUse(S.game, p[1], p[2], true) ? ["waterunit", p[1], p[2]] : null;
-      const deep = WB.isWaterTerrain(t) && canStartDeep("waterunit") && WB.unitTerrains(S.game, p[1], p[2]).includes(t);
-      return deep ? ["waterunit", p[1], p[2], t] : null;
-    }
-    if (base === "plan" && t === "water_undiggable" && canStartDeep("waterplan")) return ["waterplan", p[1], p[2], t];
-    if (t === "normal" || t === "water") return withWater(p, t === "water");
-    return null;
-  }
-
-  // What the brush would put down on a given cell
-  function brushParts(waterCell) {
-    const b = S.brush;
-    if (b.kind !== "object") return null;
-    switch (b.type) {
-      case "unit": return withWater(["unit", b.cls, b.name], waterCell);
-      case "plan": return withWater(["plan", b.name, String(S.planCount)], waterCell);
-      case "pile": return withWater(["pile", ...S.pileDraft.flatMap(([r, n]) => [r, String(n)])], waterCell);
-      case "goal": return withWater([b.goal, S.goalTarget], waterCell);
-      case "whirlpool": return ["whirlpool", String(S.whirlId)];
-    }
-    return null;
-  }
-
-  // Terrain paints under objects too (see setCellTerrain); an object brush leaves existing
-  // objects alone: click one to select it, Alt/Ctrl+click to replace it, right-click to delete it
-  function applyBrush(x, y) {
-    if (S.brush.kind === "terrain") return setCellTerrain(x, y, S.brush.char);
-    const lv = lvl();
-    const c = lv.grid[y] && lv.grid[y][x];
-    if (!c || c.item >= 0) return false;
-    const before = c.t + ":" + c.item;
-    if (S.brush.kind === "object") {
-      // An eyedropped object keeps the ground it was picked from; otherwise it follows the tile,
-      // and where it can't stand there the tile becomes grass or water under it
-      const ch = S.brush.ground || c.t;
-      const raw = brushParts(isWaterChar(ch));
-      const parts = partsOn(raw, ch) || raw;
-      c.item = itemIndexFor(parts);
-      c.t = groundChar(parts);
-    }
-    return before !== c.t + ":" + c.item;
-  }
-
-  /* Set the ground of one tile (terrain brush, Tile tab), keeping its object where the game allows
-   * (see partsOn) and removing it otherwise. Returns whether the tile changed. */
-  function setCellTerrain(x, y, ch) {
-    const lv = lvl();
-    const c = lv.grid[y] && lv.grid[y][x];
-    if (!c) return false;
-    const before = c.t + ":" + c.item;
-    const t = S.game.terrain[ch];
-    if (c.item >= 0) {
-      const p = lv.items[c.item].parts;
-      const keep = partsOn(p, ch);
-      if (keep) c.item = itemIndexFor(keep);
-      else {
-        c.item = -1;
-        setStatus(`Removed ${describeParts(p)}: it can't be on ${(WB.TERRAIN_LABELS[t] || t || ch).toLowerCase()}.`);
-      }
-    }
-    c.t = ch;
-    // the billboard's artwork spills over the tile to its left; a hole there (as in the game's
-    // own levels) keeps units from driving through it
-    let left = false;
-    if (t === "billboard" && x > 0 && terrainChar("hole") && lv.grid[y][x - 1].t !== terrainChar("hole")) {
-      left = setCellTerrain(x - 1, y, terrainChar("hole"));
-    }
-    return left || before !== c.t + ":" + c.item;
-  }
+  // editing a tile of the current level (edit.js)
+  const itemIndexFor = (parts) => E.itemIndexFor(lvl(), parts);
+  const isWaterChar = (c) => E.isWaterChar(c);
+  const brushParts = (water) => E.brushParts(water);
+  const applyBrush = (x, y) => E.applyBrush(lvl(), x, y);
+  const setCellTerrain = (x, y, ch) => E.setCellTerrain(lvl(), x, y, ch);
+  const eraseAt = (x, y) => E.eraseAt(lvl(), x, y);
+  const replaceAt = (x, y) => E.replaceAt(lvl(), x, y);
+  const floodFill = (x, y) => E.floodFill(lvl(), x, y);
+  const movedParts = (from, to) => E.movedParts(lvl(), from, to);
+  const canMove = (from, to) => E.canMove(lvl(), from, to);
+  const moveObject = (from, to) => E.moveObject(lvl(), from, to);
 
   // A brush/erase stroke keeps the operation it started with for the whole drag
   function startStroke(op, x, y) {
@@ -435,91 +306,10 @@
     draw();
   }
 
-
-  // Moving an object: it takes the land or water version that suits its new tile;
-  // an object already on that tile swaps places with it.
-  function fitParts(parts, cell) {
-    return partsOn(parts, cell.t);
-  }
-  function movedParts(from, to) {
-    const lv = lvl();
-    const a = lv.grid[from[1]][from[0]], b = lv.grid[to[1]][to[0]];
-    return [fitParts(lv.items[a.item].parts, b), b.item >= 0 ? fitParts(lv.items[b.item].parts, a) : null];
-  }
-  function canMove(from, to) {
-    if (!inMap(...to) || String(from) === String(to)) return false;
-    const lv = lvl();
-    const a = lv.grid[from[1]][from[0]], b = lv.grid[to[1]][to[0]];
-    const [pa, pb] = movedParts(from, to);
-    return !!pa && (b.item < 0 || !!pb);
-  }
-  function moveObject(from, to) {
-    const lv = lvl();
-    const a = lv.grid[from[1]][from[0]], b = lv.grid[to[1]][to[0]];
-    const [pa, pb] = movedParts(from, to);
-    const put = (cell, parts) => { cell.item = itemIndexFor(parts); cell.t = groundChar(parts); };
-    put(b, pa);
-    if (pb) put(a, pb); else a.item = -1;
-  }
-
-  // Swap the object on a tile for the brush (Alt/Ctrl+click, Fill): a terrain brush clears the object
-  function replaceAt(x, y) {
-    const lv = lvl();
-    const c = lv.grid[y] && lv.grid[y][x];
-    if (!c || c.item < 0) return false;
-    if (S.brush.kind === "terrain") { c.item = -1; c.t = S.brush.char; return true; }
-    const ch = S.brush.ground || groundChar(lv.items[c.item].parts);
-    const raw = brushParts(isWaterChar(ch));
-    const parts = partsOn(raw, ch) || raw;
-    const before = c.item;
-    c.item = itemIndexFor(parts);
-    c.t = groundChar(parts);
-    return before !== c.item;
-  }
-
-  function eraseAt(x, y) {
-    const c = lvl().grid[y] && lvl().grid[y][x];
-    if (!c || c.item < 0) return false;
-    c.item = -1;
-    return true;
-  }
-
-  function floodFill(x, y) {
-    const lv = lvl();
-    const start = lv.grid[y][x];
-    // On an object: replace every connected copy of that object with the brush
-    // (land and water versions count as the same)
-    const sameObject = (c) => partsKey(withWater(lv.items[c.item].parts, false));
-    const target = start.item >= 0 ? sameObject(start) : null;
-    // Remember the terrain/object up front: painting the first tile changes the start cell
-    const t = start.t;
-    const match = target != null ? (c) => c && c.item >= 0 && sameObject(c) === target : (c) => c && c.item < 0 && c.t === t;
-    const seen = new Set();
-    const region = [];
-    const stack = [[x, y]];
-    while (stack.length) {
-      const [cx, cy] = stack.pop();
-      const k = cx + "," + cy;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      if (!match(lv.grid[cy] && lv.grid[cy][cx])) continue;
-      region.push([cx, cy]);
-      stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
-    }
-    for (const [cx, cy] of region) target != null ? replaceAt(cx, cy) : applyBrush(cx, cy);
-  }
-
   // Select tool: copy a rectangle of tiles with their objects, then place copies of it with clicks
   // (the hovered tile takes the copy's top-left corner; anything already there is replaced)
   function copyArea(x0, y0, x1, y1) {
-    const lv = lvl();
-    [x0, x1] = [Math.max(0, Math.min(x0, x1)), Math.min(lv.grid[0].length - 1, Math.max(x0, x1))];
-    [y0, y1] = [Math.max(0, Math.min(y0, y1)), Math.min(lv.grid.length - 1, Math.max(y0, y1))];
-    const cells = [];
-    for (let y = y0; y <= y1; y++) {
-      cells.push(lv.grid[y].slice(x0, x1 + 1).map((c) => ({ t: c.t, parts: c.item >= 0 ? lv.items[c.item].parts.slice() : null })));
-    }
-    S.clip = { w: x1 - x0 + 1, h: y1 - y0 + 1, cells };
+    S.clip = E.copyArea(lvl(), x0, y0, x1, y1);
     startPasting();
   }
   function startPasting() {
@@ -535,18 +325,7 @@
     updateCursor();
     draw();
   }
-  function pasteAt(x, y) {
-    const lv = lvl();
-    let any = false;
-    S.clip.cells.forEach((row, j) => row.forEach((src, i) => {
-      if (!inMap(x + i, y + j)) return;
-      const c = lv.grid[y + j][x + i], before = c.t + ":" + c.item;
-      c.t = src.t;
-      c.item = src.parts ? itemIndexFor(src.parts) : -1;
-      if (before !== c.t + ":" + c.item) any = true;
-    }));
-    return any;
-  }
+  const pasteAt = (x, y) => E.pasteAt(lvl(), S.clip, x, y);
 
   // Brush becomes a brick pile holding the recipe of the plan's model (Shift+click on the map)
   function pickRecipe(x, y) {
@@ -554,32 +333,20 @@
     recipeBrush(lv.items[lv.grid[y][x].item].parts[1]);
   }
   function recipeBrush(name) {
-    const cfg = S.game.config[unitClassOf(name)] && S.game.config[unitClassOf(name)][name];
-    const rows = Object.entries((cfg && cfg.recipe) || {}).filter(([res, n]) => S.game.resources.includes(res) && +n > 0);
-    if (!rows.length) { setStatus(`The game doesn't list a recipe for ${displayName(name)}.`); return; }
-    S.pileDraft = rows.map(([res, n]) => [res, +n]);
+    const rows = E.recipeRows(name);
+    if (!rows) { setStatus(`The game doesn't list a recipe for ${displayName(name)}.`); return; }
+    S.pileDraft = rows;
     setBrushObject({ type: "pile" });
     showTab("palette");
     setStatus(`Brush: brick pile for ${displayName(name)} (${rows.map(([res, n]) => `${n} ${res}`).join(", ")}).`);
   }
 
   function pickAt(x, y) {
-    const lv = lvl();
-    const c = lv.grid[y][x];
-    if (c.item < 0) { setBrushTerrain(c.t); return; }
-    const p = lv.items[c.item].parts;
-    const base = p[0].replace(/^water/, "");
-    // Pick up the ground under the object too (always grass or water), so both get placed
-    const ground = groundChar(p);
-    if (base === "unit") setBrushObject({ type: "unit", cls: p[1], name: p[2], ground });
-    else if (base === "plan") { S.planCount = +p[2] || 1; setBrushObject({ type: "plan", name: p[1], ground }); }
-    else if (base === "pile") {
-      const d = [];
-      for (let i = 1; i + 1 < p.length; i += 2) d.push([p[i], +p[i + 1] || 1]);
-      S.pileDraft = d;
-      setBrushObject({ type: "pile", ground });
-    } else if (base === "goal" || base === "bonusgoal") { S.goalTarget = p[1]; setBrushObject({ type: "goal", goal: base, ground }); }
-    else if (base === "whirlpool") { S.whirlId = p[1]; setBrushObject({ type: "whirlpool" }); }
+    const b = E.pickAt(lvl(), x, y);
+    if (!b) return;
+    if (b.kind === "terrain") { setBrushTerrain(b.char); return; }
+    const { kind, ...o } = b;
+    setBrushObject(o);
     setTool("paint");
   }
 
@@ -624,12 +391,7 @@
   }
 
 
-  function goalObjective(target) {
-    if (!target || target === "anything") return "Anything";
-    const m = /^collect\s+(\d+)\s+(\w+)$/.exec(target);
-    if (m) return `Collect ${m[1]} ${displayName(m[2])}`;
-    return displayName(target);
-  }
+  const goalObjective = (target) => E.goalObjective(target);
 
 
   function badge(c, text, x, y, bg = "#111c", fg = "#fff", outline = null) {
@@ -704,8 +466,7 @@
     // Objects only: terrain sprites have their own heights and don't overlay cleanly
     if (b.kind !== "object") return;
     if (c.item >= 0 && !(S.tool === "fill" || modDown)) return;
-    const water = b.ground ? b.ground === "w" : c.item >= 0 ? WB.itemIsWater(lv.items[c.item].parts) : isWaterChar(c.t);
-    const parts = brushParts(water);
+    const parts = E.ghostParts(lv, x, y);
     if (!parts) return;
     ctx.globalAlpha = 0.7;
     drawObject(ctx, parts, x, y);
@@ -1169,23 +930,17 @@
     markSwatches();
     buildBrushOpts();
   }
-  function brushId(b) {
-    if (b.kind === "terrain") return "t:" + b.char;
-    return ["o", b.type, b.cls || "", b.name || "", b.goal || ""].join(":");
-  }
+  const brushId = (b) => E.brushId(b);
   function markSwatches() {
     const id = brushId(S.brush);
     const ground = S.brush.ground ? "t:" + S.brush.ground : null;
     for (const s of document.querySelectorAll(".swatch")) s.classList.toggle("on", s.dataset.id === id || s.dataset.id === ground);
   }
 
-  const HIDDEN_TERRAIN = new Set(["volcano"]);
   function buildTerrainPalette() {
     const box = $("#palTerrain");
     box.replaceChildren();
-    // volcano looks exactly like mountain but has no minimap icon, and no level uses it
-    const order = Object.entries(S.game.terrain).filter(([, t]) => !HIDDEN_TERRAIN.has(t));
-    for (const [ch, t] of order) {
+    for (const [ch, t] of E.terrainPalette()) {
       const label = WB.TERRAIN_LABELS[t] || t;
       const sw = el("button", { class: "swatch", title: `${label}: "${ch}"`, "data-id": "t:" + ch, onclick: () => setBrushTerrain(ch) },
         el("span", { class: "k" }, ch));
@@ -1202,14 +957,8 @@
     markSwatches();
   }
 
-  const CATS = [["model", "Models"], ["monster", "Monsters"], ["plan", "Plans"], ["misc", "Misc"]];
-  // Boulders are "monsters" to the game but act as obstacles, so they live under Misc
-  const isBoulder = (o) => o.type === "unit" && o.cls === "monster" && o.name === "boulder";
-  function categoryOf(o) {
-    if (o.type === "plan") return "plan";
-    if (o.type !== "unit" || isBoulder(o)) return "misc";
-    return o.cls === "monster" ? "monster" : "model";
-  }
+  const CATS = WBEdit.CATS;
+  const categoryOf = (o) => E.categoryOf(o);
   function buildObjectCats() {
     const seg = $("#objCats");
     seg.replaceChildren(...CATS.map(([k, label]) =>
@@ -1228,41 +977,14 @@
       box.append(sw);
       thumb(spriteName, 44).then((cv) => sw.prepend(cv));
     };
-    const cat = S.objCat;
-    const addUnit = (cls, n) =>
-      add({ type: "unit", cls, name: n }, unitSpriteName(cls, n, false) || unitSpriteName(cls, n, true), displayName(n), unitTooltip(cls, n));
-    if (cat === "model") {
-      for (const cls of ["vehicle", "building"]) for (const n of placeable(cls)) addUnit(cls, n);
-    } else if (cat === "monster") {
-      for (const n of placeable("monster")) if (n !== "boulder") addUnit("monster", n);
-    } else if (cat === "plan") {
-      if (S.monsterPlans.length && !S.patchOn.monsterPlans)
-        box.append(el("p", { class: "muted small", style: "grid-column: 1 / -1; margin: 0 0 4px" }, "Plans for monsters: switch on the Monster plans patch on the Game tab."));
-      for (const n of planModels()) {
-        const recipe = recipeOf(n);
-        add({ type: "plan", name: n }, planSpriteName(n), displayName(n), recipe ? recipeText(recipe) : displayName(n));
-      }
-    } else if (cat === "misc") {
-      add({ type: "pile" }, "resource.yellow.4", "Brick pile", "A pile of bricks (set its contents below)");
-      if (placeable("monster").includes("boulder")) addUnit("monster", "boulder");
-      add({ type: "goal", goal: "goal" }, "goal.goal", "Mission goal", "Mission goal: bring the required model here");
-      add({ type: "goal", goal: "bonusgoal" }, "goal.bonus", "Bonus goal", "Bonus goal: optional harder target");
-      add({ type: "whirlpool" }, "terrain.water_whirlpool", "Whirlpool", "Whirlpools teleport water units; place two with the same number");
-    }
+    const { items, note } = E.objectPalette(S.objCat);
+    if (note) box.append(el("p", { class: "muted small", style: "grid-column: 1 / -1; margin: 0 0 4px" }, note));
+    for (const it of items) add(it.o, it.sprite, it.label, it.title);
     markSwatches();
   }
 
 
-  function unitTooltip(cls, n) {
-    if (n === "boulder") return "I rock!";
-    const c = S.game.config[cls] && S.game.config[cls][n];
-    let t = displayName(n);
-    if (c) {
-      if (c.recipe) t += "\nRecipe: " + recipeText(c.recipe);
-      if (c.terrain) t += "\nTerrain: " + [].concat(c.terrain).join(", ");
-    }
-    return t;
-  }
+  const unitTooltip = (cls, n) => E.unitTooltip(cls, n);
 
   function resourceSelect(value, onchange) {
     return el("select", { onchange: (e) => onchange(e.target.value) },
@@ -1329,10 +1051,8 @@
     box.replaceChildren();
     const b = S.brush;
     if (b.kind !== "object") return;
-    const what = { plan: () => `Plan: ${displayName(b.name)}`, pile: () => "Brick pile", whirlpool: () => "Whirlpool",
-      goal: () => (b.goal === "goal" ? "Mission goal" : "Bonus goal"), unit: () => displayName(b.name) }[b.type];
-    const groundName = b.ground && (WB.TERRAIN_LABELS[S.game.terrain[b.ground]] || S.game.terrain[b.ground]);
-    box.append(el("div", { class: "panel-title" }, `Placing: ${what ? what() : "object"}${groundName ? " on " + groundName : ""}`));
+    const groundName = E.groundName(b);
+    box.append(el("div", { class: "panel-title" }, E.brushTitle(b)));
     if (b.type === "plan") {
       box.append(el("div", { class: "field" }, el("label", {}, "Uses"),
         el("input", { type: "number", min: 1, max: 99, value: S.planCount, onchange: (e) => (S.planCount = Math.max(1, +e.target.value || 1)) })));
@@ -1359,13 +1079,7 @@
     if (t === "text") $("#levelText").value = currentText();
   }
 
-  function currentText() {
-    const e = L();
-    if (!e) return "";
-    if (!e.dirty) return e.text;
-    if (!e.textCache) e.textCache = WB.serializeLevel(e.lv, S.game.terrain);
-    return e.textCache;
-  }
+  const currentText = () => (L() ? E.levelText(L()) : "");
 
   function refreshPanels() {
     if (!lvl()) return;
@@ -1563,51 +1277,10 @@
     setStatus("Click the map where the camera should start (Esc cancels).");
   }
 
-  // The in-game tracks' names; any other track shows as "Track <letter>"
-  const TRACK_NAMES = {
-    music_game_a: "Blue And Green Makes...", music_game_i: "Joy of Bricks",
-    music_game_6: "Sly Solutions", music_game_8: "Brain Builder",
-  };
-  const trackName = (t) => TRACK_NAMES[t] || "Track " + t.replace(/^music_game_/, "").toUpperCase();
-  const MUSIC_LINE = /^music\s*=\s*(.*)$/i;
-  function levelMusic(lv) {
-    const m = lv.mapExtra.map((l) => MUSIC_LINE.exec(l)).find(Boolean);
-    return m ? m[1].trim() : "";
-  }
-  function setLevelMusic(lv, track) {
-    lv.mapExtra = lv.mapExtra.filter((l) => !MUSIC_LINE.test(l));
-    if (track) lv.mapExtra.push("music=" + track);
-  }
-
-  /* Returns how far the old cells moved in the grid, [dx, dy] (nonzero only for the top/left edge). */
-  function resizeMap(side, delta, fillChar) {
-    const lv = lvl();
-    const h = lv.grid.length, w = lv.grid[0].length;
-    const blank = () => ({ t: fillChar, item: -1 });
-    if (side === "top" || side === "bottom") {
-      if (delta > 0) {
-        const row = Array.from({ length: w }, blank);
-        side === "top" ? lv.grid.unshift(row) : lv.grid.push(row);
-        if (side === "top" && lv.center) lv.center[1]++;
-        if (side === "top") return [0, 1];
-      } else if (h > 2) {
-        side === "top" ? lv.grid.shift() : lv.grid.pop();
-        if (side === "top" && lv.center) lv.center[1] = Math.max(0, lv.center[1] - 1);
-        if (side === "top") return [0, -1];
-      }
-    } else {
-      if (delta > 0) {
-        for (const r of lv.grid) side === "left" ? r.unshift(blank()) : r.push(blank());
-        if (side === "left" && lv.center) lv.center[0]++;
-        if (side === "left") return [1, 0];
-      } else if (w > 2) {
-        for (const r of lv.grid) side === "left" ? r.shift() : r.pop();
-        if (side === "left" && lv.center) lv.center[0] = Math.max(0, lv.center[0] - 1);
-        if (side === "left") return [-1, 0];
-      }
-    }
-    return [0, 0];
-  }
+  const trackName = WBEdit.trackName;
+  const levelMusic = (lv) => E.levelMusic(lv);
+  const setLevelMusic = (lv, track) => E.setLevelMusic(lv, track);
+  const resizeMap = (side, delta, fillChar) => E.resizeMap(lvl(), side, delta, fillChar);
 
   function revertLevel() {
     const e = L();
@@ -1622,9 +1295,7 @@
   function clearLevel() {
     if (!confirm("Replace this map with empty grass? (You can undo this.)")) return;
     pushUndo();
-    const lv = lvl();
-    for (const row of lv.grid) for (const c of row) { c.t = "."; c.item = -1; }
-    lv.inventory = [];
+    E.clearMap(lvl());
     changed();
   }
 
@@ -1657,41 +1328,14 @@
   }
   function refreshLevelList() { buildLevelList(); }
 
-  // World Builder 1 starts the tutorial when mission 1-1 is opened; editing that level switches it off
-  const isFirstMission = (l) => l.world === 1 && l.mission === 1;
-  // Mission 1 plays without the tutorial: as chosen on the Game tab, else once mission 1 is edited
-  function tutorialOff() {
-    if (!S.tutorialHook) return false;
-    if (S.patchOn.tutorial != null) return S.patchOn.tutorial;
-    const first = S.levels.find(isFirstMission);
-    return !S.tutorialHook.enabled || !!(first && first.dirty);
-  }
-  function tutorialNote(l) {
-    if (l.world === 999) return "This map is what the world map's Tutorial button loads. The tutorial points at specific tiles and objects, so changing them can leave its instructions pointing at the wrong place.";
-    if (!isFirstMission(l) || !S.tutorialHook) return null;
-    if (S.patchOn.tutorial === false) return "This mission runs the tutorial (set on the Game tab). The tutorial points at specific tiles and objects, so edits can leave its instructions pointing at the wrong place.";
-    if (tutorialOff()) return "The tutorial is switched off for this mission, so it plays as a normal level (see the Game tab). The world map's Tutorial button still works.";
-    return l.dirty
-      ? "This mission normally runs the tutorial. Because you've edited it, saving will switch the tutorial off so it plays as a normal level (the player has to reach the goal to complete it). The world map's Tutorial button still works."
-      : "This mission normally runs the tutorial. If you edit it, saving will switch the tutorial off so it plays as a normal level.";
-  }
-
-  function missionTitle(l) { return S.game.titles.get(`${l.world} ${l.mission}`) || ""; }
-
-  // Titles are one "world mission title" line each in the "level names" text member
+  const tutorialNote = (l) => E.tutorialNote(l);
+  const missionTitle = (l) => E.missionTitle(l);
   async function setMissionTitle(l, title) {
-    title = title.replace(/[\r\n]/g, " ").trim();
-    S.game.titles.set(`${l.world} ${l.mission}`, title);
-    const base = S.textEdits.has("level names") ? S.textEdits.get("level names") : (await S.movie.text("level names")) || "";
-    const lines = base.split("\n");
-    const i = lines.findIndex((ln) => { const m = /^\s*(\d+)\s+(\d+)\s/.exec(ln); return m && +m[1] === l.world && +m[2] === l.mission; });
-    const line = `${l.world} ${l.mission} ${title}`;
-    if (i >= 0) lines[i] = line; else lines.push(line);
-    S.textEdits.set("level names", lines.join("\n"));
+    await E.setMissionTitle(l, title);
     buildLevelList();
     setStatus(`Mission title changed (saved with the game file).`);
   }
-  function titleCase(s) { return s.toLowerCase().replace(/(^|\s)\S/g, (m) => m.toUpperCase()); }
+  const titleCase = WBEdit.titleCase;
 
   // ------------------------------------------------------------------ text tab, import/export
 
@@ -1723,14 +1367,11 @@
 
   function openTexts() {
     const list = $("#textsList");
-    const names = S.movie.textMembers().filter((n) => !/^map\d+\.\d+$/.test(n)).sort((a, b) => {
-      const pri = (n) => (n === "worlds" ? 0 : n === "config" ? 1 : n === "terrainmap" ? 2 : 3);
-      return pri(a) - pri(b) || a.localeCompare(b);
-    });
+    const names = E.otherTexts();
     list.replaceChildren(...names.map((n) => el("option", { value: n }, (S.textEdits.has(n) ? "● " : "") + n)));
     list.onchange = async () => {
       S.textMember = list.value;
-      $("#textsEdit").value = S.textEdits.has(list.value) ? S.textEdits.get(list.value) : (await S.movie.text(list.value)) || "";
+      $("#textsEdit").value = await E.textOf(list.value);
       $("#textsNote").textContent = list.value === "worlds" ? "Columns: world, mission, missions it unlocks (tab separated)." : "";
     };
     list.value = names[0];
@@ -1748,101 +1389,26 @@
 
   // ------------------------------------------------------------------ game patches
 
-  /* Changes the editor can make to the game's own code. Each can be switched on or off on the Game
-   * tab; saving adds or takes out each one to match (taking one out restores the original code). */
-  const PATCHES = [
-    { id: "keys", label: "WASD to scroll, Q to take apart",
-      handlers: () => S.keyHandlers, installed: (h) => h.wasd, apply: (h) => S.movie.setWasdControls(h), remove: (h) => S.movie.unsetWasdControls(h) },
-    { id: "menu", label: "Esc opens the menu",
-      handlers: () => S.keyHandlers, installed: (h) => h.menu, apply: (h) => S.movie.setMenuKey(h), remove: (h) => S.movie.unsetMenuKey(h) },
-    { id: "swoop", label: "Fix plan icon getting stuck on pickup",
-      handlers: () => S.planSwoops, installed: (h) => h.fixed, apply: (h) => S.movie.fixPlanSwoop(h), remove: (h) => S.movie.unfixPlanSwoop(h) },
-    // two changes in one: the level loader reads a deep-water terrain for units and plans, and the
-    // game gets a goal shadow for deep water (goals draw one named after their terrain)
-    { id: "deep", label: "Objects on deep water",
-      handlers: () => [...S.deepWater, ...S.goalShadow], installed: (h) => h.fixed,
-      apply: (h) => (h.goalShadow ? S.movie.fixGoalShadow(h) : S.movie.fixDeepWater(h)),
-      remove: (h) => (h.goalShadow ? S.movie.unfixGoalShadow(h) : S.movie.unfixDeepWater(h)) },
-    { id: "music", label: "Music per level",
-      handlers: () => S.levelMusic, installed: (h) => h.fixed, apply: (h) => S.movie.fixLevelMusic(h), remove: (h) => S.movie.unfixLevelMusic(h) },
-    { id: "monsterArt", label: "T Rex and scorpion", desc: "Adds their animations from World Builder 1, so levels and plans can use them.",
-      handlers: () => S.monsterArt, installed: (h) => h.fixed, apply: (h) => S.movie.fixMonsterArt(h), remove: (h) => S.movie.unfixMonsterArt(h) },
-    { id: "monsterPlans", label: "Monster plans",
-      handlers: () => S.monsterPlans, installed: (h) => h.fixed, apply: (h) => S.movie.fixMonsterPlans(h), remove: (h) => S.movie.unfixMonsterPlans(h) },
-    { id: "builtMonsterSelect", label: "Built monsters can't be controlled", desc: "A monster built from a plan isn't selected when it's done.",
-      handlers: () => S.builtMonsterSelect, installed: (h) => h.fixed, apply: (h) => S.movie.fixBuiltMonsterSelect(h), remove: (h) => S.movie.unfixBuiltMonsterSelect(h) },
-    { id: "monsterHealth", label: "Built monsters have inverse health", desc: "Health is 100 minus the energy brick's charge.",
-      handlers: () => S.monsterHealth, installed: (h) => h.fixed, apply: (h) => S.movie.fixMonsterHealth(h), remove: (h) => S.movie.unfixMonsterHealth(h) },
-    { id: "goalSave", label: "No freeze at goals", desc: "Progress saves when the mission ends instead.",
-      handlers: () => S.goalSave, installed: (h) => h.fixed, apply: (h) => S.movie.fixGoalSave(h), remove: (h) => S.movie.unfixGoalSave(h) },
-    { id: "whirlpool", label: "Fix whirlpools stuck after take-apart", desc: "Taking a unit apart on a whirlpool no longer blocks the pair.",
-      handlers: () => S.whirlpoolFix, installed: (h) => h.fixed, apply: (h) => S.movie.fixWhirlpool(h), remove: (h) => S.movie.unfixWhirlpool(h) },
-    { id: "unlockAll", label: "Cheat: unlock all levels", off: true,
-      handlers: () => S.unlockAll, installed: (h) => h.fixed, apply: (h) => S.movie.fixUnlockAll(h), remove: (h) => S.movie.unfixUnlockAll(h) },
-  ];
-  /* Level checks (and the palette) see what a ticked patch adds on save as there already: the deep-water
-   * goal shadow, monster plan icons, and the T Rex and scorpion as placeable */
-  function syncGoalShadows() {
-    S.game.planIcons = new Set(S.planIconsBase);
-    for (const h of S.monsterPlans) for (const t of h.targets) {
-      if (S.patchOn.monsterPlans) S.game.planIcons.add(t.name);
-      else S.game.planIcons.delete(t.name);
-    }
-    S.game.placeable.monster = new Set(S.placeableMonstersBase);
-    for (const h of S.monsterArt) for (const n of h.monsters) {
-      if (S.patchOn.monsterArt) S.game.placeable.monster.add(n);
-      else S.game.placeable.monster.delete(n);
-    }
-    S.game.goalShadows = new Set(S.goalShadowsBase);
-    if (S.patchOn.deep && S.goalShadow.length) S.game.goalShadows.add("water_undiggable");
-    else if (S.goalShadow.length) S.game.goalShadows.delete("water_undiggable");
-  }
-  const TUTORIAL_LABEL = "Mission 1 without the tutorial";
-  const patchAvailable = (p) => p.handlers().length > 0;
-  const patchInstalled = (p) => patchAvailable(p) && p.handlers().every(p.installed);
-  const patchesChanged = () => !!S.patchOn && (PATCHES.some((p) => patchAvailable(p) && S.patchOn[p.id] !== patchInstalled(p)) ||
-    (S.patchOn.tutorial != null && !!S.tutorialHook && S.patchOn.tutorial === S.tutorialHook.enabled));
-
-  /* Each patch stays as the file has it. A file with none could be an untouched game (which gets
-   * every patch but the cheat) or one saved with them all switched off, so that's told apart by the choices
-   * last saved for this game. */
+  // Each patch as the file has it, told apart from a game saved with them all off by the choices last saved (edit.js)
   function initPatches() {
-    // an older version of a patch (h.old) counts as there: it stays on, and saving updates it
-    const present = (p) => p.handlers().some((h) => p.installed(h) || !!h.old);
-    const fresh = !PATCHES.some(present);
     let saved = null;
     try { saved = JSON.parse(prefs.get("patches" + S.game.edition)); } catch (e) { /* none saved */ }
-    S.patchOn = {};
-    for (const p of PATCHES) {
-      // partly there (a file from before a patch gained its second half): on, and saving completes it.
-      // A patch newer than the choices last saved (not in them) starts as it would on a fresh game.
-      const known = saved && p.id in saved;
-      const on = fresh ? (known ? saved[p.id] : !p.off) : present(p) || (!known && !p.off);
-      S.patchOn[p.id] = patchAvailable(p) && on;
-    }
-    S.patchOn.tutorial = null; // null: off once mission 1 is edited (tutorialOff)
+    E.initPatches(saved);
   }
 
   function buildGamePanel() {
     const box = $("#tab-game");
     box.replaceChildren(el("div", { class: "panel-title" }, "Game patches"),
       el("p", { class: "muted small" }, "Changes to the game itself, made when you save. Unticking one takes it back out of the game."));
-    const row = (label, desc, checked, disabled, onchange) => el("div", { class: "card" },
-      el("label", { class: "check", style: "color:var(--text)" }, el("input", { type: "checkbox", checked, disabled, onchange }), " ", el("b", {}, label)),
-      desc ? el("div", { class: "meta" }, desc) : null);
-    for (const p of PATCHES) {
-      const ok = patchAvailable(p);
-      box.append(row(p.label, ok ? p.desc : "This game file doesn't have the code this changes.", S.patchOn[p.id], !ok, (ev) => {
-        S.patchOn[p.id] = ev.target.checked;
-        syncGoalShadows();
-        if (p.id === "monsterPlans" || p.id === "monsterArt") buildObjectCats();
-        refreshPanels();
-      }));
-    }
-    if (S.tutorialHook) {
-      box.append(row(TUTORIAL_LABEL,
-        "Turns on by itself when you edit mission 1.",
-        tutorialOff(), false, (ev) => { S.patchOn.tutorial = ev.target.checked; refreshPanels(); }));
+    for (const p of E.patchRows()) {
+      box.append(el("div", { class: "card" },
+        el("label", { class: "check", style: "color:var(--text)" }, el("input", { type: "checkbox", checked: p.on, disabled: !p.available,
+          onchange: (ev) => {
+            E.setPatch(p.id, ev.target.checked);
+            if (p.id === "monsterPlans" || p.id === "monsterArt") buildObjectCats();
+            refreshPanels();
+          } }), " ", el("b", {}, p.label)),
+        p.desc ? el("div", { class: "meta" }, p.desc) : null));
     }
   }
 
@@ -1850,11 +1416,7 @@
 
   function openSave() {
     const dirty = S.levels.filter((l) => l.dirty);
-    const issues = [];
-    for (const l of dirty) {
-      const v = WB.validateLevel(l.lv, S.game);
-      if (v.errs.length) issues.push(`World ${l.world} mission ${l.mission}: ${v.errs.join(" ")}`);
-    }
+    const issues = E.saveProblems();
     const body = $("#saveBody");
     body.replaceChildren(...[
       S.imported ? el("p", {}, "Imported from ", el("code", {}, S.imported), ".") : null,
@@ -1875,26 +1437,17 @@
 
   // What saving will change in the game's own code, per the Game tab
   function patchSummary() {
-    const add = [], remove = [];
-    for (const p of PATCHES) {
-      if (!patchAvailable(p) || S.patchOn[p.id] === patchInstalled(p)) continue;
-      (S.patchOn[p.id] ? add : remove).push(p.label);
-    }
-    if (S.tutorialHook && S.tutorialHook.enabled === tutorialOff()) (tutorialOff() ? add : remove).push(TUTORIAL_LABEL);
+    const { add, remove } = E.patchSummary();
     if (!add.length && !remove.length) return null;
     return el("p", {}, [add.length ? `Adds: ${add.join(", ")}. ` : "", remove.length ? `Removes: ${remove.join(", ")}.` : ""].join(""));
   }
 
-  const dcrName = () => (S.game && S.game.edition === 2 ? "worldbuilder2.dcr" : "worldbuilder.dcr");
+  const dcrName = () => E.dcrName();
 
   // Apply pending edits and rebuild the movie (the .dcr bytes)
   async function buildMovie() {
     setStatus("Building game file…");
-    for (const l of S.levels) if (l.dirty) await S.movie.setText(l.member, WB.serializeLevel(l.lv, S.game.terrain));
-    for (const [name, text] of S.textEdits) await S.movie.setText(name, text);
-    if (S.tutorialHook && S.tutorialHook.enabled === tutorialOff()) await S.movie.setTutorialHook(S.tutorialHook, !tutorialOff());
-    for (const p of PATCHES) for (const h of p.handlers()) await (S.patchOn[p.id] ? p.apply(h) : p.remove(h));
-    return S.movie.save();
+    return E.buildMovie();
   }
 
   // Path of `name` in the open file's folder (desktop app only)
@@ -1922,12 +1475,7 @@
   }
 
   function markSaved(what, size) {
-    for (const l of S.levels) if (l.dirty) { l.text = WB.serializeLevel(l.lv, S.game.terrain); l.dirty = false; }
-    S.textEdits.clear();
-    S.imported = null;
-    for (const p of PATCHES) if (patchAvailable(p)) S.patchOn[p.id] = patchInstalled(p);
-    S.patchOn.tutorial = null;
-    prefs.set("patches" + S.game.edition, JSON.stringify(Object.fromEntries(PATCHES.map((p) => [p.id, S.patchOn[p.id]]))));
+    prefs.set("patches" + S.game.edition, JSON.stringify(E.markSaved()));
     buildLevelList();
     refreshPanels();
     setStatus(`Saved ${what} (${(size / 1048576).toFixed(2)} MB).`);
@@ -2001,7 +1549,7 @@
     e.target.value = "";
     if (f && confirmDiscard()) openFile(f);
   });
-  const unsaved = () => S.levels.some((l) => l.dirty) || !!(S.textEdits && S.textEdits.size) || !!S.imported || patchesChanged();
+  const unsaved = () => !!S.game && E.unsaved();
   function confirmDiscard() {
     return !unsaved() || confirm("You have unsaved changes. Open another file anyway?");
   }
