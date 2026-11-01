@@ -1622,7 +1622,8 @@
   }
 
   // The sideways sprite to make the icon from. Only monsters with their full artwork (a sideways and a
-  // down-facing sprite) get plans: WB2's scorpion and T Rex have just a frame or two and aren't finished.
+  // down-facing sprite) get plans: WB2's scorpion and T Rex have just a frame or two until the T Rex
+  // and scorpion patch adds the rest (monsterPlanIcon uses that artwork before it's in the game).
   function monsterPose(movie, n) {
     const has = (x) => movie.byName.has(x) && movie.byName.get(x).type === 1;
     if (![`monster.${n}.down`, `monster.${n}.down.walk.1`].some(has)) return null;
@@ -1669,15 +1670,17 @@
     return { w: tw, h: th, rgba, regX: Math.floor(tw / 2), regY: Math.ceil(th / 2) };
   }
   WB.planIcon = planIcon;
+  WB.bitd32 = (img, alpha) => bitd32(img, alpha);
 
-  // 32-bit BITD (planar rows: alpha, red, green, blue; transparent is white, like the game's plan icons)
-  function bitd32(img) {
+  /* 32-bit BITD (planar rows: alpha, red, green, blue). Transparent is white, like the game's plan
+   * icons; with `alpha` it's also alpha 0, like its map sprites. */
+  function bitd32(img, alpha = false) {
     const { w, h, rgba } = img;
     const pitch = 4 * w, d = new Uint8Array(pitch * h);
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const o = (y * w + x) * 4, r = y * pitch;
       const see = rgba[o + 3] === 0;
-      d[r + x] = 255;
+      d[r + x] = see && alpha ? 0 : 255;
       d[r + w + x] = see ? 255 : rgba[o];
       d[r + 2 * w + x] = see ? 255 : rgba[o + 1];
       d[r + 3 * w + x] = see ? 255 : rgba[o + 2];
@@ -1700,7 +1703,11 @@
   // The icon this version makes for a monster's plan, or null if it has no sprite to make it from
   Movie.prototype.monsterPlanIcon = async function (n) {
     const pose = monsterPose(this, n);
-    const src = pose && (await this.bitmap(pose));
+    let src = pose && (await this.bitmap(pose));
+    if (!src && this.byName.has(`monster.${n} parent`) && monsterArtTemplate(this, n)) {
+      const ported = [`monster.${n}.left`, `monster.${n}.left.walk.1`, `monster.${n}.right`, `monster.${n}.right.walk.1`].find((x) => !this.byName.has(x) && WB.wb1MonsterSprite(x));
+      if (ported && WB.wb1MonsterSprite(`monster.${n}.down`)) src = WB.wb1MonsterSprite(ported);
+    }
     return src ? planIcon(src) : null;
   };
 
@@ -1846,6 +1853,120 @@
   Movie.prototype.unfixMonsterPlans = async function (handler) {
     for (const t of handler.targets) await this._removeMember(t.member);
     handler.fixed = false;
+  };
+
+  // ---------------------------------------------------------------- T Rex and scorpion artwork
+
+  /* World Builder 2 kept the T Rex's and scorpion's scripts (getMember asks for
+   * "monster.<name>.<dir>[.walk.N|.attack.N]": 10 walk frames for the T Rex, 3 for the scorpion) and
+   * config, and drew new frozen sprites for them, but dropped the rest of their artwork, so drawing
+   * one stops the game with a script error. World Builder 1 has all of it. wb1monsters.js holds
+   * those sprites (made by wb1_monster_sprites.js, converted to 32-bit like WB2's own), and the
+   * fix adds the ones a game is missing, each with a copy of the monster's frozen sprite's record. */
+  let wb1Sprites;
+  function wb1MonsterSprites() {
+    if (wb1Sprites === undefined) {
+      wb1Sprites = null;
+      try {
+        wb1Sprites = typeof module !== "undefined" && module.exports ? require("./wb1monsters.js") : root.WB1_MONSTER_SPRITES || null;
+      } catch (e) { /* not shipped: no patch */ }
+    }
+    return wb1Sprites;
+  }
+  function fromBase64(s) {
+    if (typeof Buffer !== "undefined") return new Uint8Array(Buffer.from(s, "base64"));
+    const b = atob(s), u8 = new Uint8Array(b.length);
+    for (let i = 0; i < b.length; i++) u8[i] = b.charCodeAt(i);
+    return u8;
+  }
+  // {w, h, rgba, regX, regY} of a 32-bit BITD, decoded the way Movie.bitmap decodes members
+  function rgbaOf32(bitd, w, h, regX, regY) {
+    const pitch = 4 * w;
+    const raw = bitd.length === pitch * h ? bitd : packbits(bitd, pitch * h);
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const r = y * pitch, o = (y * w + x) * 4;
+      rgba[o] = raw[r + w + x]; rgba[o + 1] = raw[r + 2 * w + x]; rgba[o + 2] = raw[r + 3 * w + x];
+      rgba[o + 3] = rgba[o] === 255 && rgba[o + 1] === 255 && rgba[o + 2] === 255 ? 0 : 255;
+    }
+    return { w, h, rgba, regX, regY };
+  }
+
+  /* WB2's frozen T Rex has its registration point in the middle, so its block of ice hangs 51 pixels
+   * below the tile's anchor (no other map sprite goes past 40) and the next row of the map, drawn over
+   * it, cuts off its bottom. The game never showed it, so nobody noticed. The fix lowers the point to
+   * where the T Rex's feet are on its up-facing sprite (the way it freezes): 33 above the bottom.
+   * {member: [height, game's regY, fixed regY]} */
+  const FROZEN_REG = { "monster.trex.frozen": [102, 51, 69] };
+  function frozenRegTargets(movie) {
+    const out = [];
+    for (const [member, [h, from, to]] of Object.entries(FROZEN_REG)) {
+      const m = movie.byName.get(member);
+      if (!m || m.type !== 1 || bes16(m.spec, 6) - bes16(m.spec, 2) !== h) continue;
+      const y = bes16(m.spec, 18);
+      if (y === from || y === to) out.push({ member, from, to });
+    }
+    return out;
+  }
+  Movie.prototype._setRegY = async function (name, y) {
+    const m = this.byName.get(name);
+    const d = (await this.data(m.id)).slice();
+    new DataView(d.buffer).setInt16(12 + be32(d, 4) + 18, y);
+    this.setData(m.id, d);
+    await this._reindexMembers();
+  };
+
+  // The 32-bit sprite whose member record the monster's added sprites copy: its frozen one
+  function monsterArtTemplate(movie, n) {
+    const m = movie.byName.get(`monster.${n}.frozen`);
+    return m && m.type === 1 && m.spec && m.spec[23] === 32 ? m : null;
+  }
+
+  /* [{fixed, monsterArt, monsters, targets: [{name, member, img: {w, h, regX, regY}, bitd}]}]: WB1's
+   * sprites for the monsters this game has a script and a frozen sprite for, that it has none of its
+   * own of (in WB1 itself every one is the game's own, so there's nothing to do). */
+  Movie.prototype.findMonsterArt = async function () {
+    const all = wb1MonsterSprites();
+    if (!all) return [];
+    const targets = [];
+    for (const [member, [w, h, regX, regY, b64]] of Object.entries(all)) {
+      const n = member.split(".")[1];
+      if (!this.byName.has(`monster.${n} parent`) || !monsterArtTemplate(this, n)) continue;
+      const bitd = fromBase64(b64);
+      if (this.byName.has(member) && !(await this._memberHasBitmap(member, bitd))) continue; // the game's own
+      targets.push({ name: n, member, img: { w, h, regX, regY }, bitd });
+    }
+    if (!targets.length) return [];
+    const monsters = [...new Set(targets.map((t) => t.name))].sort();
+    const regs = frozenRegTargets(this).filter((r) => monsters.includes(r.member.split(".")[1]));
+    let fixed = regs.every((r) => bes16(this.byName.get(r.member).spec, 18) === r.to);
+    for (const t of targets) if (fixed && !(await this._memberIsCurrent(t.member, t.bitd))) fixed = false;
+    return [{ fixed, monsterArt: true, monsters, targets, regs }];
+  };
+
+  Movie.prototype.fixMonsterArt = async function (handler) {
+    if (handler.fixed) return;
+    for (const t of handler.targets) {
+      const tpl = monsterArtTemplate(this, t.name);
+      const tplCast = await this.data(tpl.id);
+      await this._removeMember(t.member);
+      await this._addMember(bitmapCast(tplCast, t.member, t.img), t.bitd, tpl.id);
+    }
+    for (const r of handler.regs) await this._setRegY(r.member, r.to);
+    handler.fixed = true;
+  };
+
+  Movie.prototype.unfixMonsterArt = async function (handler) {
+    for (const t of handler.targets) await this._removeMember(t.member);
+    for (const r of handler.regs) await this._setRegY(r.member, r.from);
+    handler.fixed = false;
+  };
+
+  // A ported sprite as {w, h, rgba, regX, regY}, for showing it before it's in the game
+  WB.wb1MonsterSprite = function (member) {
+    const all = wb1MonsterSprites();
+    const s = all && all[member];
+    return s ? rgbaOf32(fromBase64(s[4]), s[0], s[1], s[2], s[3]) : null;
   };
 
   /* Put "jmp <to>" in front of code[at]: jumps that crossed `at` get 3 longer, ones that landed on
@@ -2013,13 +2134,19 @@
     g.units = Object.fromEntries(Object.entries(units).map(([k, v]) => [k, [...v].sort()]));
     // Units the game can actually create: readmap needs a "<class>.<name> parent" script, and the
     // unit needs its own artwork (defender2/defender3 are only listed in config and break the level).
+    // A monster is drawn as "monster.<name>.<direction>[.walk.N|.attack.N]", so it needs a sprite
+    // facing each way: WB2's T Rex (only "frozen") and scorpion (one frame) were cut and stop the
+    // game with a script error as soon as they're drawn.
     const lower = this.members.filter((m) => m.name).map((m) => ({ n: m.name.toLowerCase(), t: m.type }));
     const scripts = new Set(lower.filter((m) => m.n.endsWith(" parent")).map((m) => m.n));
+    const hasArt = (p) => lower.some((m) => m.t === 1 && (m.n === p || m.n.startsWith(`${p}.`)));
     g.placeable = {};
     for (const [cls, list] of Object.entries(g.units)) {
       g.placeable[cls] = new Set(list.filter((n) =>
         scripts.has(`${cls}.${n} parent`) &&
-        lower.some((m) => m.t === 1 && (m.n === `${cls}.${n}` || m.n.startsWith(`${cls}.${n}.`)))));
+        (cls === "monster"
+          ? ["up", "down", "left", "right"].every((d) => hasArt(`${cls}.${n}.${d}`))
+          : hasArt(`${cls}.${n}`))));
     }
     g.musicTracks = this.musicTracks();
     // terrains a goal can stand on: the ones with a "goal.shadow.<terrain>" member to draw under it
@@ -2193,7 +2320,9 @@
       if (p[0] === "whirlpool") whirl.set(p[1], (whirl.get(p[1]) || 0) + 1);
       if (p[0] === "unit" || p[0] === "waterunit") {
         if (game.placeable && !(game.placeable[p[1]] && game.placeable[p[1]].has(p[2]))) {
-          errs.push(`${p[2]} at ${at} isn't finished in this game (no script or artwork) and causes a script error; remove it.`);
+          errs.push(p[1] === "monster" && (p[2] === "trex" || p[2] === "scorpion") && game.edition === 2
+            ? `${p[2]} at ${at} needs the "T Rex and scorpion" game patch (Game tab); without its artwork it causes a script error.`
+            : `${p[2]} at ${at} isn't finished in this game (no script or artwork) and causes a script error; remove it.`);
           return;
         }
         const onWater = p[0] === "waterunit";

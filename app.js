@@ -31,6 +31,7 @@
 
   const S = {
     movie: null, game: null, fileName: "", filePath: null,
+    monsterArt: [], monsterArtMembers: new Set(),
     levels: [], cur: -1,
     tool: "paint",
     brush: { kind: "terrain", char: "." },
@@ -133,6 +134,10 @@
     // monsters get plans once the game has their plans-bar icons; the editor shows them from the start
     S.monsterPlans = await movie.findMonsterPlans();
     S.monsterHealth = await movie.findMonsterHealth();
+    // WB2's T Rex and scorpion can be placed once the patch gives them their WB1 artwork
+    S.monsterArt = await movie.findMonsterArt();
+    S.monsterArtMembers = new Set(S.monsterArt.flatMap((h) => h.targets.map((t) => t.member)));
+    S.placeableMonstersBase = new Set(game.placeable.monster);
     S.planIconsBase = new Set(game.planIcons);
     S.monsterPlanIcons = new Map();
     for (const h of S.monsterPlans) for (const t of h.targets) {
@@ -166,7 +171,8 @@
   async function sprite(name) {
     if (S.sprites.has(name)) return S.sprites.get(name);
     const p = (async () => {
-      const bm = await S.movie.bitmap(name);
+      // a T Rex or scorpion sprite the patch adds on save is shown from the editor's copy
+      const bm = (await S.movie.bitmap(name)) || (S.monsterArtMembers.has(name) ? WB.wb1MonsterSprite(name) : null);
       if (!bm) return null;
       const img = await createImageBitmap(new ImageData(bm.rgba, bm.w, bm.h));
       return { img, w: bm.w, h: bm.h, regX: bm.regX, regY: bm.regY };
@@ -224,7 +230,10 @@
     matteNow("goal_bubble");
   }
 
-  function hasSprite(name) { return S.movie.byName.has(name) && S.movie.byName.get(name).type === 1; }
+  function hasSprite(name) {
+    if (S.monsterArtMembers.has(name)) return !!(S.patchOn && S.patchOn.monsterArt);
+    return S.movie.byName.has(name) && S.movie.byName.get(name).type === 1;
+  }
 
   // Which bitmap represents a unit, plan or pile on the map
   // models shown facing right in the editor (everything else faces down, or right if it has no down)
@@ -1881,6 +1890,8 @@
       remove: (h) => (h.goalShadow ? S.movie.unfixGoalShadow(h) : S.movie.unfixDeepWater(h)) },
     { id: "music", label: "Music per level",
       handlers: () => S.levelMusic, installed: (h) => h.fixed, apply: (h) => S.movie.fixLevelMusic(h), remove: (h) => S.movie.unfixLevelMusic(h) },
+    { id: "monsterArt", label: "T Rex and scorpion", desc: "Adds their animations from World Builder 1, so levels and plans can use them.",
+      handlers: () => S.monsterArt, installed: (h) => h.fixed, apply: (h) => S.movie.fixMonsterArt(h), remove: (h) => S.movie.unfixMonsterArt(h) },
     { id: "monsterPlans", label: "Monster plans",
       handlers: () => S.monsterPlans, installed: (h) => h.fixed, apply: (h) => S.movie.fixMonsterPlans(h), remove: (h) => S.movie.unfixMonsterPlans(h) },
     { id: "builtMonsterSelect", label: "Built monsters can't be controlled", desc: "A monster built from a plan isn't selected when it's done.",
@@ -1894,12 +1905,18 @@
     { id: "unlockAll", label: "Cheat: unlock all levels", off: true,
       handlers: () => S.unlockAll, installed: (h) => h.fixed, apply: (h) => S.movie.fixUnlockAll(h), remove: (h) => S.movie.unfixUnlockAll(h) },
   ];
-  // level checks see the deep-water goal shadow as there when the patch is ticked (it's added on save)
+  /* Level checks (and the palette) see what a ticked patch adds on save as there already: the deep-water
+   * goal shadow, monster plan icons, and the T Rex and scorpion as placeable */
   function syncGoalShadows() {
     S.game.planIcons = new Set(S.planIconsBase);
     for (const h of S.monsterPlans) for (const t of h.targets) {
       if (S.patchOn.monsterPlans) S.game.planIcons.add(t.name);
       else S.game.planIcons.delete(t.name);
+    }
+    S.game.placeable.monster = new Set(S.placeableMonstersBase);
+    for (const h of S.monsterArt) for (const n of h.monsters) {
+      if (S.patchOn.monsterArt) S.game.placeable.monster.add(n);
+      else S.game.placeable.monster.delete(n);
     }
     S.game.goalShadows = new Set(S.goalShadowsBase);
     if (S.patchOn.deep && S.goalShadow.length) S.game.goalShadows.add("water_undiggable");
@@ -1943,7 +1960,7 @@
       box.append(row(p.label, ok ? p.desc : "This game file doesn't have the code this changes.", S.patchOn[p.id], !ok, (ev) => {
         S.patchOn[p.id] = ev.target.checked;
         syncGoalShadows();
-        if (p.id === "monsterPlans") buildObjectCats();
+        if (p.id === "monsterPlans" || p.id === "monsterArt") buildObjectCats();
         refreshPanels();
       }));
     }

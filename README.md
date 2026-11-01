@@ -15,6 +15,7 @@ Saving a .exe applies the following patches to a game. Each one can be switched 
  - Q is now a shortcut for "take apart"
  - Objects that can exist in deep water can be placed in deep water, including goals
  - Each level can chose which music track plays (instead of random)
+ - World Builder 2's T Rex and scorpion get their animations from World Builder 1, so they can be placed and built (WB2 only has their frozen sprites; without this they cause a script error). The sprites are in `wb1monsters.js`, made by `node wb1_monster_sprites.js <World Builder 1 .dcr>` (in this folder)
  - Plans for monsters (except the boulder)
  - Built monsters can't be controlled (they're no longer selected when they finish building)
  - Built monsters have inverse health compared to the energy brick used

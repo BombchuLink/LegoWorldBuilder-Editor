@@ -5,6 +5,7 @@
 //  - deep water: levels can start swimmers and plans on deep water ("waterunit,vehicle,tugboat,water_undiggable")
 //    and place goals there ("goal,freighter,water_undiggable", with a darker goal shadow added to the game)
 //  - levels can choose their music with a "music=music_game_a" line in [map]
+//  - World Builder 2's T Rex and scorpion get their animations from World Builder 1 (it only has their frozen sprites)
 //  - monster plans: levels can give plans for monsters (all but the boulder); adds their plans-bar icons
 //  - a monster built from a plan isn't selected (and so can't be driven) when it's done
 //  - a monster built from a plan gets the inverse of its energy brick's charge as health
@@ -21,25 +22,27 @@ async function pending(mv) {
   const deep = [...(await mv.findDeepWater()), ...(await mv.findGoalShadow())].filter((h) => !h.fixed);
   const music = (await mv.findLevelMusic()).filter((h) => !h.fixed);
   const goalSave = (await mv.findGoalSave()).filter((h) => !h.fixed);
+  const monsterArt = (await mv.findMonsterArt()).filter((h) => !h.fixed);
   const monsterPlans = (await mv.findMonsterPlans()).filter((h) => !h.fixed);
   const monsterHealth = (await mv.findMonsterHealth()).filter((h) => !h.fixed);
   const whirlpool = (await mv.findWhirlpoolFix()).filter((h) => !h.fixed);
   const monsterSelect = (await mv.findBuiltMonsterSelect()).filter((h) => !h.fixed);
-  return { keys, menu, swoops, deep, music, goalSave, monsterPlans, monsterHealth, whirlpool, monsterSelect };
+  return { keys, menu, swoops, deep, music, goalSave, monsterArt, monsterPlans, monsterHealth, whirlpool, monsterSelect };
 }
 
 (async () => {
   for (const path of process.argv.slice(2)) {
     const mv = await WB.openMovie(fs.readFileSync(path));
     await mv.loadGame();
-    const { keys, menu, swoops, deep, music, goalSave, monsterPlans, monsterHealth, whirlpool, monsterSelect } = await pending(mv);
-    if (!keys.length && !menu.length && !swoops.length && !deep.length && !music.length && !goalSave.length && !monsterPlans.length && !monsterHealth.length && !whirlpool.length && !monsterSelect.length) { console.log(`${path}: nothing to do`); continue; }
+    const { keys, menu, swoops, deep, music, goalSave, monsterArt, monsterPlans, monsterHealth, whirlpool, monsterSelect } = await pending(mv);
+    if (!keys.length && !menu.length && !swoops.length && !deep.length && !music.length && !goalSave.length && !monsterArt.length && !monsterPlans.length && !monsterHealth.length && !whirlpool.length && !monsterSelect.length) { console.log(`${path}: nothing to do`); continue; }
     for (const h of keys) await mv.setWasdControls(h);
     for (const h of menu) await mv.setMenuKey(h);
     for (const h of swoops) await mv.fixPlanSwoop(h);
     for (const h of deep) await (h.goalShadow ? mv.fixGoalShadow(h) : mv.fixDeepWater(h));
     for (const h of music) await mv.fixLevelMusic(h);
     for (const h of goalSave) await mv.fixGoalSave(h);
+    for (const h of monsterArt) await mv.fixMonsterArt(h);
     for (const h of monsterPlans) await mv.fixMonsterPlans(h);
     for (const h of monsterHealth) await mv.fixMonsterHealth(h);
     for (const h of whirlpool) await mv.fixWhirlpool(h);
@@ -49,12 +52,12 @@ async function pending(mv) {
     const check = await WB.openMovie(out);
     await check.loadGame();
     const left = await pending(check);
-    if (left.keys.length || left.menu.length || left.swoops.length || left.deep.length || left.music.length || left.goalSave.length || left.monsterPlans.length || left.monsterHealth.length || left.whirlpool.length || left.monsterSelect.length) throw new Error(`${path}: patch didn't verify`);
+    if (left.keys.length || left.menu.length || left.swoops.length || left.deep.length || left.music.length || left.goalSave.length || left.monsterArt.length || left.monsterPlans.length || left.monsterHealth.length || left.whirlpool.length || left.monsterSelect.length) throw new Error(`${path}: patch didn't verify`);
     let backup = path + ".orig", n = 1;
     while (fs.existsSync(backup)) backup = `${path}.orig-${++n}`;
     fs.copyFileSync(path, backup);
     fs.writeFileSync(path, out);
-    const done = `${keys.length ? `WASD/Q keys (${keys.length}) ` : ""}${menu.length ? `Esc menu (${menu.length}) ` : ""}${swoops.length ? `plan pickup fix (${swoops.length}) ` : ""}${deep.length ? "deep water " : ""}${music.length ? "level music " : ""}${goalSave.length ? "goal save " : ""}${monsterPlans.length ? "monster plans " : ""}${monsterHealth.length ? "monster health " : ""}${whirlpool.length ? "whirlpool fix " : ""}${monsterSelect.length ? "built monster select " : ""}`;
+    const done = `${keys.length ? `WASD/Q keys (${keys.length}) ` : ""}${menu.length ? `Esc menu (${menu.length}) ` : ""}${swoops.length ? `plan pickup fix (${swoops.length}) ` : ""}${deep.length ? "deep water " : ""}${music.length ? "level music " : ""}${goalSave.length ? "goal save " : ""}${monsterArt.length ? "T Rex and scorpion " : ""}${monsterPlans.length ? "monster plans " : ""}${monsterHealth.length ? "monster health " : ""}${whirlpool.length ? "whirlpool fix " : ""}${monsterSelect.length ? "built monster select " : ""}`;
     console.log(`${path}: ${done.trim()}: backup in ${backup}`);
   }
 })();
