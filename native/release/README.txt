@@ -77,4 +77,6 @@ IF SOMETHING GOES WRONG
    ~/.local/share/worldbuilder/editor/prefs.json on Linux; delete the file to start afresh.
  - Please report problems at https://github.com/BombchuLink/LegoWorldBuilder-Editor/issues
 
-The licences of the libraries and font the editor is built with are in the "licenses" folder.
+The editor is free software under the MIT No Attribution licence (LICENSE.txt). The licences of
+the libraries and font it's built with are in the "licenses" folder. LEGO and World Builder belong
+to their owners.

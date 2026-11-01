@@ -45,4 +45,6 @@ Saving a .exe applies the following patches to a game. Each one can be switched 
 
 `node patch_game.js <file>...` (in this folder) applies these changes (all but the tutorial switch and the cheat) to a `Launcher.exe` directly, keeping a `.orig` backup.
 
+## Licence
 
+The editor is under the [MIT No Attribution](LICENSE) licence (MIT-0). The release builds include SDL3, Dear ImGui, QuickJS-ng and zlib (zlib and MIT licences) and the Fredoka font (SIL Open Font License); their licences ship in each archive's `licenses` folder.
