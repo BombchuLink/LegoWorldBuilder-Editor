@@ -1,14 +1,29 @@
 # WorldBuilder Level Editor
 
-A level editor for LEGO *World Builder* and *World Builder 2*
+A level editor for LEGO *World Builder* and *World Builder 2*: paint the maps, place units, plans,
+brick piles, goals and whirlpools, change mission titles, music and starting plans, and fix some of
+the games' bugs.
 
 This editor was made to work with the "Project Brick Game Archive" (Part 3) release of World Builder. It's possible it might work with other versions but idk that might require more tinkering.
 
-The editor can be booted by either using the electron wrapper, or index.html in a web browser.
+## Getting it
 
-The desktop app draws in software, so it runs as two processes (about 280 MB) instead of Chromium's usual four or more. If maps ever feel slow, `WBE_GPU=1 ./worldbuilder-editor` turns GPU drawing back on.
+Download the archive for your system from the releases page:
 
-A native version (SDL3 + Dear ImGui, about 70 MB of memory and a small program) is in `native/`. It runs this editor's own `wbcore.js`, `scene.js` and `edit.js` (the editing rules), so both open, edit, patch and save games identically and draw the same map. See `native/README.md`.
+- **Windows 7 or later:** `WorldBuilderEditor-1.1-windows.zip`. Unzip it and run `WorldBuilderEditor.exe`. Nothing to install.
+- **Linux (x86-64, glibc 2.35+: Ubuntu 22.04, Debian 12, Fedora 36, Mint 21, SteamOS 3 and newer):** `WorldBuilderEditor-1.1-linux-x86_64.tar.gz`. Unpack it and run `./worldbuilder-editor`; `./install.sh` adds it to your applications menu.
+
+Then open `Launcher.exe` from your World Builder game folder. The `README.txt` in the archive covers the tools, keys and saving.
+
+Since 1.1 the editor is a small native program (SDL3 + Dear ImGui, with its JavaScript core running in QuickJS) instead of an Electron app: about 70 MB of memory instead of 280 MB, and a 3.5 MB download instead of a 288 MB `node_modules`. See [CHANGELOG.md](CHANGELOG.md) and, for building it, [native/README.md](native/README.md).
+
+## What's where
+
+- `wbcore.js`: reading and writing the games: the Shockwave movie inside `Launcher.exe`, its levels and text, and the patches.
+- `scene.js`: what the map looks like (which sprite goes where).
+- `edit.js`: the editing rules (what can stand where, filling, moving, resizing, building the movie to save).
+- `native/`: the program: the editor's state, tools and panels (`native/js/editor.js`) and the C++ window that runs it.
+- `patch_game.js`, `wb1_monster_sprites.js`: command-line tools (Node), see below.
 
 ## Patches
 

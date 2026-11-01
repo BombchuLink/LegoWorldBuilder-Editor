@@ -1,5 +1,5 @@
-/* The editing rules, shared by the browser editor (app.js) and the native one (native/js/editor.js):
- * what the brush puts down and what can stand where, moving, filling, copying and pasting tiles,
+/* The editing rules (used by native/js/editor.js, kept free of any UI so they can be tested on
+ * their own): what the brush puts down and what can stand where, moving, filling, copying and pasting tiles,
  * resizing a map, a level's music and mission title, the game patches, and building the movie to
  * save. No DOM; needs wbcore.js (WB).
  *

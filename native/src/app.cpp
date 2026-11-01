@@ -26,6 +26,7 @@
 #include "js_host.h"
 #include "procstats.h"
 #include "ui_bind.h"
+#include "icon_rgba.h"
 
 namespace {
 
@@ -157,6 +158,8 @@ double prof_hover = 0, prof_ui = 0, prof_render = 0;  // ms, for WBE_SWEEP
 double prof_t[3] = {}, prof_c[3] = {};  // clear, draw data, present: wall and thread-CPU ms
 using wbe::thread_cpu_ms;
 
+void apply_style();
+
 struct App : wbe::UiHost {
   SDL_Window* window = nullptr;
   SDL_Renderer* renderer = nullptr;
@@ -185,6 +188,19 @@ struct App : wbe::UiHost {
   int map_button = -1;  // button held since a press the editor took on the map
   std::string js_error;
   bool redraw = false, quit_now = false;
+  float ui_scale = 1;  // the display's scale (Windows' 125%, 150%…): the UI's sizes and fonts follow it
+
+  void set_ui_scale(float s) {
+    if (!(s > 0.5f && s < 8)) s = 1;
+    ui_scale = s;
+    ImGuiStyle& st = ImGui::GetStyle();
+    st = ImGuiStyle();
+    ImGui::StyleColorsDark();
+    apply_style();
+    st.ScaleAllSizes(s);
+    st.FontScaleDpi = s;
+    redraw = true;
+  }
   std::string want_level;  // WBE_LEVEL
 
   std::mutex dialog_mutex;
@@ -483,7 +499,7 @@ struct App : wbe::UiHost {
 
   ImVec2 to_screen(float x, float y) const { return {map_min.x + view.x + x * view.zoom, map_min.y + view.y + y * view.zoom}; }
 
-  // A tile's diamond, as facePath in app.js
+  // A tile's diamond
   void face_points(int tx, int ty, float inset, ImVec2 out[4]) const {
     float ox = tx * CELL - ty * SKEW, oy = ty * CELL;
     out[0] = to_screen(ox + 1 + inset, oy + inset);
@@ -598,7 +614,45 @@ struct App : wbe::UiHost {
           break;
         }
         case 4: alpha = static_cast<float>(n[o + 1]); break;
+        case 6:
+          draw_goal_popup(dl, static_cast<int>(n[o + 1]), static_cast<int>(n[o + 2]), sc.strs[static_cast<size_t>(n[o + 3])], sc.strs[static_cast<size_t>(n[o + 4])]);
+          break;
       }
+    }
+  }
+
+  /* The game's goal popup: a white speech bubble pointing at a spot 20px above the tile, with a
+   * heading, the goal's target and "AT THIS LOCATION". At least the game's own size, so it stays
+   * readable when zoomed out. */
+  void draw_goal_popup(ImDrawList* dl, int tx, int ty, const std::string& head, const std::string& target) {
+    const float k = std::max(1.0f, view.zoom);
+    const char* lines[3] = {head.c_str(), target.c_str(), "AT THIS LOCATION"};
+    const float sizes[3] = {13 * k, 12 * k, 8 * k};
+    const float pad = 9 * k, gap = 3 * k;
+    float w = 60 * k, h = 2 * pad;
+    ImVec2 ts[3];
+    for (int i = 0; i < 3; i++) {
+      ts[i] = badge_font->CalcTextSizeA(sizes[i], FLT_MAX, 0, lines[i]);
+      w = std::max(w, ts[i].x + 2 * pad);
+      h += ts[i].y + (i ? gap : 0);
+    }
+    // the point's tip
+    ImVec2 tip = to_screen(tx * CELL - ty * SKEW + 10, ty * CELL - 20);
+    float tail = 8 * k;
+    ImVec2 a{std::round(tip.x - w / 2), std::round(tip.y - tail - h)}, b{a.x + w, a.y + h};
+    const ImU32 ink = IM_COL32(0, 0, 0, 255), paper = IM_COL32(255, 255, 255, 255);
+    float r = 7 * k, line = std::max(2.0f, 2 * k);
+    dl->AddRectFilled({a.x + 2 * k, a.y + 3 * k}, {b.x + 2 * k, b.y + 3 * k}, IM_COL32(0, 0, 0, 70), r);  // shadow
+    dl->AddRectFilled(a, b, paper, r);
+    dl->AddRect(a, b, ink, r, 0, line);
+    ImVec2 t0{tip.x - 7 * k, b.y - line}, t1{tip.x + 7 * k, b.y - line};
+    dl->AddTriangleFilled(t0, t1, tip, paper);
+    dl->AddLine({t0.x, b.y - line / 2}, tip, ink, line);
+    dl->AddLine({t1.x, b.y - line / 2}, tip, ink, line);
+    float y = a.y + pad;
+    for (int i = 0; i < 3; i++) {
+      dl->AddText(badge_font, sizes[i], {std::round(a.x + (w - ts[i].x) / 2), std::round(y)}, ink, lines[i]);
+      y += ts[i].y + gap;
     }
   }
 
@@ -702,14 +756,14 @@ struct App : wbe::UiHost {
 
     float left_w = 230, side_w = 0;
     try {
-      JSValue l = js->call("layout", {js->num(ImGui::GetContentRegionAvail().x)});
-      left_w = static_cast<float>(js->num_at(l, 0));
-      side_w = static_cast<float>(js->num_at(l, 1));
+      JSValue l = js->call("layout", {js->num(ImGui::GetContentRegionAvail().x / ui_scale)});
+      left_w = static_cast<float>(js->num_at(l, 0)) * ui_scale;
+      side_w = static_cast<float>(js->num_at(l, 1)) * ui_scale;
       js->free(l);
     } catch (const std::exception& e) {
       report(e);
     }
-    const float grip = side_w > 0 ? 6 : 0;
+    const float grip = side_w > 0 ? 6 * ui_scale : 0;
 
     // level list
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {6, 6});
@@ -773,8 +827,11 @@ struct App : wbe::UiHost {
       ImVec2 ts = ImGui::CalcTextSize(t);
       ImGui::SetCursorScreenPos({map_min.x + (map_size.x - ts.x) / 2, map_min.y + map_size.y / 2 - 50});
       ImGui::TextUnformatted(t);
-      ImGui::SetCursorScreenPos({map_min.x + map_size.x / 2 - 110, map_min.y + map_size.y / 2 - 20});
-      if (ImGui::Button("Open Launcher.exe...", {220, 40})) file_dialog("open", false, "", "exe");
+      ImGui::SetCursorScreenPos({map_min.x + map_size.x / 2 - 110 * ui_scale, map_min.y + map_size.y / 2 - 20 * ui_scale});
+      if (ImGui::Button("Open Launcher.exe...", {220 * ui_scale, 40 * ui_scale})) file_dialog("open", false, "", "exe");
+      const char* v = "Version " WBE_VERSION;
+      ImGui::SetCursorScreenPos({map_min.x + (map_size.x - ImGui::CalcTextSize(v).x) / 2, map_min.y + map_size.y / 2 + 30 * ui_scale});
+      ImGui::TextDisabled("%s", v);
       ImGui::SetCursorScreenPos({map_min.x, map_min.y + map_size.y});
     }
 
@@ -806,7 +863,7 @@ struct App : wbe::UiHost {
       ImGui::SameLine(0, 0);
       ImGui::InvisibleButton("grip", {grip, ImGui::GetContentRegionAvail().y});
       if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-      if (ImGui::IsItemActive() && ImGui::GetIO().MouseDelta.x != 0) run("setSideWidth", {js->num(side_w - ImGui::GetIO().MouseDelta.x)});
+      if (ImGui::IsItemActive() && ImGui::GetIO().MouseDelta.x != 0) run("setSideWidth", {js->num((side_w - ImGui::GetIO().MouseDelta.x) / ui_scale)});
       if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) run("setSideWidth", {js->num(360)});
       ImGui::SameLine(0, 0);
       ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {8, 6});
@@ -830,8 +887,8 @@ struct App : wbe::UiHost {
 };
 
 // ---------------------------------------------------------------- benchmark (WBE_SWEEP=1)
-// The same synthetic test the Electron harness runs: 240 frames hovering over tiles, then 240
-// frames panning, at the same positions; prints CPU (all threads) and memory.
+// A synthetic test (the one the 1.0 Electron editor was measured with): 240 frames hovering over
+// tiles, then 240 frames panning, at the same positions; prints CPU (all threads) and memory.
 
 double cpu_ms() { return wbe::process_cpu_ms(); }
 long pss_kb() { return wbe::memory_kb(); }
@@ -940,8 +997,8 @@ ImFont* load_font(const std::vector<std::string>& candidates, float size, bool m
   return nullptr;
 }
 
-/* The web editor's look (style.css): its dark slate panels, blue for what's selected, yellow for
- * accents, rounded 6px controls and the Fredoka font. */
+/* The editor's look (from the 1.0 editor's style sheet): dark slate panels, blue for what's
+ * selected, yellow for accents, rounded 6px controls and the Fredoka font. */
 namespace theme {
 const ImVec4 bg = rgb(0x15171c), panel = rgb(0x1d2027), panel2 = rgb(0x252933), line = rgb(0x333845), text = rgb(0xe7e9ee),
              muted = rgb(0x9097a6), yellow = rgb(0xffcf1a), blue = rgb(0x2a7de1), hover = rgb(0x2c313d), sel = rgb(0x2b3446);
@@ -1034,7 +1091,22 @@ int main(int argc, char** argv) {
   }
   App app;
   app.wake_event = SDL_RegisterEvents(1);
-  app.window = SDL_CreateWindow("WorldBuilder Level Editor", 1400, 900, SDL_WINDOW_RESIZABLE);
+  {
+    // 1400×900 at the display's scale, but no bigger than the screen
+    SDL_DisplayID d = SDL_GetPrimaryDisplay();
+    float k = d ? SDL_GetDisplayContentScale(d) : 1;
+    if (!(k > 0.5f)) k = 1;
+    int w = static_cast<int>(1400 * k), h = static_cast<int>(900 * k);
+    SDL_Rect r;
+    if (d && SDL_GetDisplayUsableBounds(d, &r)) { w = std::min(w, r.w); h = std::min(h, r.h); }
+    app.window = SDL_CreateWindow("WorldBuilder Level Editor", w, h, SDL_WINDOW_RESIZABLE);
+  }
+  if (app.window) {
+    if (SDL_Surface* icon = SDL_CreateSurfaceFrom(64, 64, SDL_PIXELFORMAT_RGBA32, const_cast<unsigned char*>(kIconRgba), 64 * 4)) {
+      SDL_SetWindowIcon(app.window, icon);
+      SDL_DestroySurface(icon);
+    }
+  }
   const char* want = std::getenv("WBE_RENDERER");
   // WBE_RENDERER, else SDL's choice; if that fails (an old graphics driver, a virtual machine,
   // remote desktop), the next one down until one works
@@ -1056,9 +1128,8 @@ int main(int argc, char** argv) {
   ImGui::CreateContext();
   ImGuiIO& io = ImGui::GetIO();
   io.IniFilename = nullptr;
-  ImGui::StyleColorsDark();
-  apply_style();
-  // Fredoka as the web editor uses (native/fonts), and a system font for the symbols it lacks
+  app.set_ui_scale(SDL_GetWindowDisplayScale(app.window));
+  // Fredoka (native/fonts), and a system font for the symbols it lacks
   // (✓ ⚠ ● …): DejaVu on Linux, Segoe UI Symbol on Windows (7 and later), else Arial
   const std::string fonts = wbe::JsHost::editor_dir() + "/native/fonts/";
   const char* windir = std::getenv("WINDIR");
@@ -1074,7 +1145,7 @@ int main(int argc, char** argv) {
   if (app.ui_font) load_font(ui_fonts, 15, true);
   else app.ui_font = load_font(ui_fonts, 15);
   if (!app.ui_font) app.ui_font = io.Fonts->AddFontDefault();
-  // map labels, as the web editor's badges (Fredoka 600, 11px)
+  // map labels (Fredoka 600, 11px)
   app.badge_font = load_font(bold_main, 11);
   if (!app.badge_font) app.badge_font = load_font(bold_fonts, 11);
   if (!app.badge_font) app.badge_font = app.ui_font;
@@ -1107,6 +1178,7 @@ int main(int argc, char** argv) {
       if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && e.window.windowID == SDL_GetWindowID(app.window))) {
         if (quit_at) app.quit_now = true; else app.request_quit();
       }
+      if (e.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED) app.set_ui_scale(SDL_GetWindowDisplayScale(app.window));
       if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) {
         std::lock_guard lock(app.dialog_mutex);
         app.dialog_results.emplace_back("drop", std::string(e.drop.data));

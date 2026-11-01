@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- WorldBuilder Level Editor icon: a yellow 2x2 brick on a grass tile -->
+  <!-- grass tile -->
+  <path d="M128 150 L240 194 L128 238 L16 194 Z" fill="#3fae49"/>
+  <path d="M16 194 L128 238 L128 252 L16 208 Z" fill="#1f9fd8"/>
+  <path d="M240 194 L128 238 L128 252 L240 208 Z" fill="#1580b8"/>
+  <!-- brick body -->
+  <path d="M40 104 L128 140 L128 206 L40 170 Z" fill="#e0a800"/>
+  <path d="M216 104 L128 140 L128 206 L216 170 Z" fill="#c48f00"/>
+  <path d="M128 68 L216 104 L128 140 L40 104 Z" fill="#ffd633"/>
+  <!-- studs -->
+  <g>
+    <g transform="translate(128 84)"><rect x="-17" y="-14" width="34" height="14" fill="#e0a800"/><ellipse cy="0" rx="17" ry="7" fill="#e0a800"/><ellipse cy="-14" rx="17" ry="7" fill="#ffe680"/></g>
+    <g transform="translate(84 102)"><rect x="-17" y="-14" width="34" height="14" fill="#e0a800"/><ellipse cy="0" rx="17" ry="7" fill="#e0a800"/><ellipse cy="-14" rx="17" ry="7" fill="#ffe680"/></g>
+    <g transform="translate(172 102)"><rect x="-17" y="-14" width="34" height="14" fill="#e0a800"/><ellipse cy="0" rx="17" ry="7" fill="#e0a800"/><ellipse cy="-14" rx="17" ry="7" fill="#ffe680"/></g>
+    <g transform="translate(128 120)"><rect x="-17" y="-14" width="34" height="14" fill="#e0a800"/><ellipse cy="0" rx="17" ry="7" fill="#e0a800"/><ellipse cy="-14" rx="17" ry="7" fill="#ffe680"/></g>
+  </g>
+</svg>

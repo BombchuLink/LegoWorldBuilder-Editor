@@ -1,6 +1,6 @@
 /* What the map looks like, as drawing commands: which sprite stands for each tile and object and
- * where it goes, in map pixels. Shared by the browser editor (app.js draws the commands on a
- * canvas) and the native one (which draws them with SDL), so both show the same picture.
+ * where it goes, in map pixels. The editor (native/js/editor.js) hands them to the C++ host, which
+ * draws them with SDL.
  * No DOM; needs wbcore.js (WB).
  *
  * A scene is made for one game with an env:

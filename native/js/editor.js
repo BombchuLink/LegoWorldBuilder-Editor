@@ -1,6 +1,5 @@
-/* The native editor's JS: the editor's state, tools and panels. The editing rules come from
- * edit.js and what the map looks like from scene.js, both shared with the browser editor; this
- * file is the native counterpart of app.js. It draws its panels with the UI functions the C++ host
+/* The editor's JS: its state, tools and panels. The editing rules come from edit.js and what the
+ * map looks like from scene.js. It draws its panels with the UI functions the C++ host
  * provides (a thin layer over Dear ImGui, see src/ui_bind.cpp) and hands the map to the host as
  * numbers in a Float64Array plus a string table. Global NE.
  *
@@ -368,6 +367,7 @@
    *   3 face  tx ty inset fill stroke lineWidth screenPx dashOn dashOff
    *   4 alpha a
    *   5 tiles x0 y0 x1 y1 stroke lineWidth screenPx dashOn dashOff   (outline of a block of tiles)
+   *   6 popup tx ty heading target   (the game's goal popup over tile tx, ty)
    * Sprites that aren't loaded yet are left out; after loadPending() the scene is worth asking for again. */
   function pack(cmds) {
     const strs = [], ids = new Map();
@@ -381,6 +381,7 @@
         case "badge": nums.set([2, str(c[1]), c[2], c[3], str(c[4]), str(c[5]), str(c[6])], o); break;
         case "face": nums.set([3, c[1], c[2], c[3], str(c[4]), str(c[5]), c[6], c[7] ? 1 : 0, c[8] ? c[8][0] : 0, c[8] ? c[8][1] : 0], o); break;
         case "alpha": nums.set([4, c[1]], o); break;
+        case "popup": nums.set([6, c[1], c[2], str(c[3]), str(c[4])], o); break;
         case "tiles": nums.set([5, c[1], c[2], c[3], c[4], str(c[5]), c[6], c[7] ? 1 : 0, c[8] ? c[8][0] : 0, c[8] ? c[8][1] : 0], o); break;
       }
     });
@@ -439,6 +440,12 @@
     }
     if (S.sel && inMap(...S.sel)) out.push(["face", S.sel[0], S.sel[1], 1, null, "#2a7de1", 3, true, null]);
     if (h) out.push(["face", h[0], h[1], 1, null, "#ffcf1a", 2, true, null]);
+    // a goal's objective shows while the mouse is over it, on top of everything, as in the game
+    if (h && !mv) {
+      const c = lv.grid[h[1]][h[0]];
+      const p = c.item >= 0 && lv.items[c.item].parts;
+      if (p && (p[0] === "goal" || p[0] === "bonusgoal")) out.push(["popup", h[0], h[1], p[0] === "goal" ? "Mission Goal:" : "Bonus Goal:", E.goalObjective(p[1])]);
+    }
     return pack(out);
   }
 
@@ -683,7 +690,7 @@
     });
     UI.endChild();
     if (S.game) {
-      UI.textColored(MUTED, `World Builder${S.game.edition === 2 ? " 2" : ""} · ${S.levels.length} levels`, false);
+      UI.textColored(MUTED, `World Builder${S.game.edition === 2 ? " 2" : ""} · ${S.levels.length} levels · editor ${NATIVE.version()}`, false);
       if (UI.button("Save…", -1, 0, "accent")) openSave();
       UI.tooltip("Write Launcher.exe with all your changes, or export the .dcr (Ctrl+S)");
       if (UI.button("Import .dcr…", -1)) requestImport();
@@ -958,7 +965,7 @@
   }
 
   /* A little made-up map drawn from the game's own tiles and objects, for the map-size control
-   * (as the web editor's). Kept once all its sprites are loaded. */
+   * Kept once all its sprites are loaded. */
   const MOCK_COLS = 6, MOCK_ROWS = 3;
   function mockMap() {
     if (S.mock && S.mock.game === S.game) return S.mock.packed;
@@ -1112,6 +1119,6 @@
     size, label, cellAt, fit, startView, mouseDown, mouseMove, mouseUp, key, cursor,
     drawLevels, drawToolbar, drawSide, drawModals, runJobs, hasJobs, unsaved, askQuit,
     hasLevel: () => !!lvl(),
-    title: () => (S.movie ? `${E.unsaved() ? "● " : ""}${S.fileName} · WorldBuilder Level Editor` : "WorldBuilder Level Editor"),
+    title: () => (S.movie ? `${E.unsaved() ? "● " : ""}${S.fileName} · WorldBuilder Level Editor` : `WorldBuilder Level Editor ${NATIVE.version()}`),
   };
 })(typeof self !== "undefined" ? self : this);

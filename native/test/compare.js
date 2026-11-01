@@ -1,4 +1,4 @@
-// Runs native/js/driver.js in Node (V8, as the Electron editor does) and in the native QuickJS
+// Runs native/js/driver.js in Node (V8) and in the native QuickJS
 // build on the same game files, and checks the files they write are the same.
 //   node test/compare.js <out dir> <Launcher.exe>...
 // Byte-identical output is "same"; otherwise every resource is compared after decompression

@@ -1,4 +1,4 @@
-/* Test driver shared by Node (V8, like the Electron editor) and the native QuickJS host: the same
+/* Test driver shared by Node (V8) and the native QuickJS host: the same
  * steps the editor takes to open a Launcher.exe and save it, so the two engines' outputs can be
  * compared byte for byte.   WBE_DRIVER.run(bytes, op) -> Promise<{bytes, report}>
  *   resave     open and save without changes

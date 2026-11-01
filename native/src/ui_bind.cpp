@@ -17,6 +17,8 @@ namespace {
 
 UiHost* g_host = nullptr;
 
+float ui_scale() { return ImGui::GetStyle().FontScaleDpi > 0 ? ImGui::GetStyle().FontScaleDpi : 1.0f; }
+
 // ---------------------------------------------------------------- arguments
 
 std::string arg_str(JSContext* c, int argc, JSValueConst* argv, int i, const char* def = "") {
@@ -72,6 +74,10 @@ ImU32 css(const std::string& s) {
 #define FN(name) JSValue name(JSContext* c, JSValueConst, int argc, JSValueConst* argv)
 #define S(i) arg_str(c, argc, argv, i)
 #define F(i, d) arg_f(c, argc, argv, i, d)
+/* Sizes in the JS are in logical pixels; the display's scale (Windows' 125%, 150%…) turns them into
+ * real ones. PX(i, d): a size argument in real pixels; LOGICAL(v): a measured size back for the JS. */
+#define PX(i, d) (arg_f(c, argc, argv, i, d) * ui_scale())
+#define LOGICAL(v) JS_NewFloat64(c, (v) / ui_scale())
 #define I(i, d) arg_int(c, argc, argv, i, d)
 #define B(i, d) arg_bool(c, argc, argv, i, d)
 #define UNUSED_ARGS (void)c, (void)argc, (void)argv
@@ -90,12 +96,12 @@ FN(ui_textColored) {
   ImGui::PopStyleColor();
   return UNDEF;
 }
-// heading(text, color): a section title as the web editor's: small capitals, muted (or that colour)
+// heading(text, color): a section title: small capitals, muted (or that colour)
 FN(ui_heading) {
   std::string s = S(0), col = S(1);
   for (char& ch : s) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
   ImGui::Dummy({0, 4});
-  ImGui::PushFont(nullptr, ImGui::GetFontSize() * 0.8f);
+  ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 0.8f);  // (before the display scale)
   ImGui::PushStyleColor(ImGuiCol_Text, col.empty() ? ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled) : ImGui::ColorConvertU32ToFloat4(css(col)));
   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {ImGui::GetStyle().ItemSpacing.x, 2});
   ImGui::TextUnformatted(s.c_str());
@@ -105,18 +111,19 @@ FN(ui_heading) {
   return UNDEF;
 }
 FN(ui_separator) { UNUSED_ARGS; ImGui::Separator(); return UNDEF; }
-FN(ui_sameLine) { ImGui::SameLine(F(0, 0), F(1, -1)); return UNDEF; }
+FN(ui_sameLine) { float sp = F(1, -1);
+  ImGui::SameLine(PX(0, 0), sp < 0 ? sp : sp * ui_scale()); return UNDEF; }
 FN(ui_spacing) { UNUSED_ARGS; ImGui::Spacing(); return UNDEF; }
 FN(ui_newLine) { UNUSED_ARGS; ImGui::NewLine(); return UNDEF; }
 FN(ui_alignText) { UNUSED_ARGS; ImGui::AlignTextToFramePadding(); return UNDEF; }
-FN(ui_indent) { ImGui::Indent(F(0, 0)); return UNDEF; }
-FN(ui_unindent) { ImGui::Unindent(F(0, 0)); return UNDEF; }
-FN(ui_setNextItemWidth) { ImGui::SetNextItemWidth(F(0, 0)); return UNDEF; }
-FN(ui_availWidth) { UNUSED_ARGS; return JS_NewFloat64(c, ImGui::GetContentRegionAvail().x); }
-FN(ui_cursorX) { UNUSED_ARGS; return JS_NewFloat64(c, ImGui::GetCursorPosX()); }
-FN(ui_frameHeight) { UNUSED_ARGS; return JS_NewFloat64(c, ImGui::GetFrameHeightWithSpacing()); }
-FN(ui_textWidth) { std::string t = S(0); return JS_NewFloat64(c, ImGui::CalcTextSize(t.c_str()).x); }
-FN(ui_textLineHeight) { UNUSED_ARGS; return JS_NewFloat64(c, ImGui::GetTextLineHeightWithSpacing()); }
+FN(ui_indent) { ImGui::Indent(PX(0, 0)); return UNDEF; }
+FN(ui_unindent) { ImGui::Unindent(PX(0, 0)); return UNDEF; }
+FN(ui_setNextItemWidth) { ImGui::SetNextItemWidth(PX(0, 0)); return UNDEF; }
+FN(ui_availWidth) { UNUSED_ARGS; return LOGICAL(ImGui::GetContentRegionAvail().x); }
+FN(ui_cursorX) { UNUSED_ARGS; return LOGICAL(ImGui::GetCursorPosX()); }
+FN(ui_frameHeight) { UNUSED_ARGS; return LOGICAL(ImGui::GetFrameHeightWithSpacing()); }
+FN(ui_textWidth) { std::string t = S(0); return LOGICAL(ImGui::CalcTextSize(t.c_str()).x); }
+FN(ui_textLineHeight) { UNUSED_ARGS; return LOGICAL(ImGui::GetTextLineHeightWithSpacing()); }
 FN(ui_pushId) { std::string s = S(0); ImGui::PushID(s.c_str()); return UNDEF; }
 FN(ui_popId) { UNUSED_ARGS; ImGui::PopID(); return UNDEF; }
 FN(ui_beginDisabled) { ImGui::BeginDisabled(B(0, true)); return UNDEF; }
@@ -142,16 +149,16 @@ FN(ui_keyPressed) {
 // ---------------------------------------------------------------- buttons and choices
 
 // flow(width): stay on the line if an item that wide still fits, else start a new one
-FN(ui_flow) { ui_flow_item(F(0, 0)); return UNDEF; }
+FN(ui_flow) { ui_flow_item(PX(0, 0)); return UNDEF; }
 // width(label, kind): how wide a "button" or "checkbox" with that label is
 FN(ui_width) {
   std::string label = S(0), kind = S(1);
   float t = ImGui::CalcTextSize(label.c_str(), nullptr, true).x;
   const ImGuiStyle& st = ImGui::GetStyle();
-  return JS_NewFloat64(c, kind == "checkbox" ? ImGui::GetFrameHeight() + st.ItemInnerSpacing.x + t : t + st.FramePadding.x * 2);
+  return LOGICAL(kind == "checkbox" ? ImGui::GetFrameHeight() + st.ItemInnerSpacing.x + t : t + st.FramePadding.x * 2);
 }
 
-/* Button looks, as the web editor's: "accent" yellow, "primary" (or "on") blue, "ghost" no frame,
+/* Button looks: "accent" yellow, "primary" (or "on") blue, "ghost" no frame,
  * "pill" a round segment button (yellow when on); returns how many style colours/vars it pushed */
 std::pair<int, int> push_kind(const std::string& kind, bool on) {
   auto col = [](ImGuiCol k, ImU32 v) { ImGui::PushStyleColor(k, v); };
@@ -180,7 +187,7 @@ std::pair<int, int> push_kind(const std::string& kind, bool on) {
 FN(ui_button) {
   std::string s = S(0);
   auto [nc, nv] = push_kind(S(3), false);
-  bool r = ImGui::Button(s.c_str(), {F(1, 0), F(2, 0)});
+  bool r = ImGui::Button(s.c_str(), {PX(1, 0), PX(2, 0)});
   ImGui::PopStyleColor(nc);
   ImGui::PopStyleVar(nv);
   return JS_NewBool(c, r);
@@ -204,7 +211,7 @@ FN(ui_checkbox) {
   ImGui::Checkbox(s.c_str(), &v);
   return JS_NewBool(c, v);
 }
-// selectable(label, selected): a list row; the selected one has a blue bar on its left, as in the web editor
+// selectable(label, selected): a list row; the selected one has a blue bar on its left
 FN(ui_selectable) {
   std::string s = S(0);
   bool sel = B(1, false);
@@ -271,7 +278,7 @@ FN(ui_inputText) {
 // textEditor(id, text, height): a multi-line editor; returns the text as it stands
 FN(ui_textEditor) {
   std::string id = S(0), v = S(1);
-  ImGui::InputTextMultiline(("##" + id).c_str(), &v, {-1, F(2, -1)}, ImGuiInputTextFlags_AllowTabInput);
+  ImGui::InputTextMultiline(("##" + id).c_str(), &v, {-1, PX(2, -1)}, ImGuiInputTextFlags_AllowTabInput);
   return JS_NewStringLen(c, v.data(), v.size());
 }
 
@@ -282,7 +289,7 @@ FN(ui_endTabBar) { UNUSED_ARGS; ImGui::EndTabBar(); return UNDEF; }
 // tab(label, select, current): whether it's the open tab; select makes it so; current: it was open last frame
 FN(ui_tab) {
   std::string s = S(0);
-  // as the web editor's tabs: muted until open, then a yellow line under it
+  // muted until open, then a yellow line under it
   bool cur = B(2, false);
   if (!cur) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
   bool open = ImGui::BeginTabItem(s.c_str(), nullptr, B(1, false) ? ImGuiTabItemFlags_SetSelected : 0);
@@ -296,7 +303,7 @@ FN(ui_tab) {
 }
 FN(ui_beginChild) {
   std::string s = S(0);
-  ImGui::BeginChild(s.c_str(), {F(1, 0), F(2, 0)}, B(3, false) ? ImGuiChildFlags_Borders : 0);
+  ImGui::BeginChild(s.c_str(), {PX(1, 0), PX(2, 0)}, B(3, false) ? ImGuiChildFlags_Borders : 0);
   return UNDEF;
 }
 FN(ui_endChild) { UNUSED_ARGS; ImGui::EndChild(); return UNDEF; }
@@ -305,7 +312,7 @@ FN(ui_openPopup) { std::string s = S(0); ImGui::OpenPopup(s.c_str()); return UND
 FN(ui_beginModal) {
   std::string s = S(0);
   ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, {0.5f, 0.5f});
-  float w = F(1, 460), h = F(2, 0);
+  float w = PX(1, 460), h = PX(2, 0);
   if (h > 0) ImGui::SetNextWindowSize({w, h}, ImGuiCond_Appearing);
   else ImGui::SetNextWindowSizeConstraints({w, 0}, {w, FLT_MAX});
   return JS_NewBool(c, ImGui::BeginPopupModal(s.c_str(), nullptr, h > 0 ? 0 : ImGuiWindowFlags_AlwaysAutoResize));
@@ -313,7 +320,7 @@ FN(ui_beginModal) {
 FN(ui_endPopup) { UNUSED_ARGS; ImGui::EndPopup(); return UNDEF; }
 FN(ui_closePopup) { UNUSED_ARGS; ImGui::CloseCurrentPopup(); return UNDEF; }
 
-/* resizer(nums, strs, cols, rows, label): the Level tab's map-size control, as the web editor's: a
+/* resizer(nums, strs, cols, rows, label): the Level tab's map-size control: a
  * little map (scene commands, see editor.js pack, in map pixels for a cols×rows block of tiles)
  * with round + and − buttons on each edge; hovering a pair lights up the edge it changes.
  * Returns "top+", "left-"... for a click, else "". */
@@ -330,12 +337,12 @@ FN(ui_resizer) {
   float cols = F(2, 6), rows = F(3, 3);
   std::string label = S(4);
 
-  const float BW = 28, BH = 26, GAP = 4;
+  const float k0 = ui_scale(), BW = 28 * k0, BH = 26 * k0, GAP = 4 * k0;
   float W = ImGui::GetContentRegionAvail().x;
-  float mw = std::min(190.0f, W - 2 * (BW + 8)), mh = 106;
+  float mw = std::min(190.0f * k0, W - 2 * (BW + 8 * k0)), mh = 106 * k0;
   ImVec2 o = ImGui::GetCursorScreenPos();
   float cx = o.x + W / 2;
-  ImVec2 m0{cx - mw / 2, o.y + BH + 6}, m1{m0.x + mw, m0.y + mh};
+  ImVec2 m0{cx - mw / 2, o.y + BH + 6 * k0}, m1{m0.x + mw, m0.y + mh};
   std::string hit;
   const char* hover_side = nullptr;
   auto pair = [&](const char* side, ImVec2 at, bool vertical) {
@@ -356,9 +363,9 @@ FN(ui_resizer) {
   };
   float pw = 2 * BW + GAP, ph = 2 * BH + GAP;
   pair("top", {cx - pw / 2, o.y}, false);
-  pair("left", {m0.x - BW - 8, (m0.y + m1.y) / 2 - ph / 2}, true);
-  pair("right", {m1.x + 8, (m0.y + m1.y) / 2 - ph / 2}, true);
-  pair("bottom", {cx - pw / 2, m1.y + 6}, false);
+  pair("left", {m0.x - BW - 8 * k0, (m0.y + m1.y) / 2 - ph / 2}, true);
+  pair("right", {m1.x + 8 * k0, (m0.y + m1.y) / 2 - ph / 2}, true);
+  pair("bottom", {cx - pw / 2, m1.y + 6 * k0}, false);
 
   // the map: fitted into the box, with headroom for tall trees and models
   const float CELLW = 50, SKEWW = 25;
@@ -399,7 +406,7 @@ FN(ui_resizer) {
   dl->AddText(font, fs, {l0.x + 7, l0.y + 1}, IM_COL32_WHITE, label.c_str());
 
   ImGui::SetCursorScreenPos(o);
-  ImGui::Dummy({W, BH + 6 + mh + 6 + BH});
+  ImGui::Dummy({W, BH + 12 * k0 + mh + BH});
   return JS_NewString(c, hit.c_str());
 }
 
@@ -430,7 +437,7 @@ FN(ui_levelRow) {
 FN(ui_swatch) {
   std::string id = S(0), name = S(1), label = S(2);
   bool on = B(3, false);
-  float size = F(4, 52);
+  float size = PX(4, 52);
   ImFont* font = ImGui::GetFont();
   float fs = ImGui::GetFontSize() * 0.8f;
   float lh = fs + 4;
@@ -541,6 +548,10 @@ FN(nat_prefsSave) {
   return UNDEF;
 }
 FN(nat_quit) { UNUSED_ARGS; if (g_host) g_host->quit(); return UNDEF; }
+#ifndef WBE_VERSION
+#define WBE_VERSION "dev"
+#endif
+FN(nat_version) { UNUSED_ARGS; return JS_NewString(c, WBE_VERSION); }
 
 struct Entry {
   const char* name;
@@ -583,7 +594,7 @@ void bind_ui(JSContext* c, UiHost* host) {
   });
   install(c, "NATIVE", {
     {"readFile", nat_readFile}, {"writeFile", nat_writeFile}, {"saveFile", nat_saveFile}, {"fileDialog", nat_fileDialog},
-    {"prefsLoad", nat_prefsLoad}, {"prefsSave", nat_prefsSave}, {"quit", nat_quit},
+    {"prefsLoad", nat_prefsLoad}, {"prefsSave", nat_prefsSave}, {"quit", nat_quit}, {"version", nat_version},
   });
 }
 
